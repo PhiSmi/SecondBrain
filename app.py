@@ -7,6 +7,33 @@ import ingest
 import query
 
 st.set_page_config(page_title="SecondBrain", page_icon="🧠", layout="wide")
+
+
+def _check_password() -> bool:
+    """Return True if the user has entered the correct password, False otherwise."""
+    correct_password = st.secrets.get("APP_PASSWORD")
+
+    # No password configured — skip the gate (useful for local dev)
+    if not correct_password:
+        return True
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🧠 SecondBrain")
+    password = st.text_input("Password", type="password")
+    if st.button("Enter", type="primary"):
+        if password == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
 st.title("🧠 SecondBrain")
 st.caption("Your personal RAG-powered knowledge base")
 
