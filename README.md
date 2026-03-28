@@ -163,22 +163,22 @@ This is critical for RAG. Without this constraint, the model might blend its tra
 ### Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌───────────┐
-│  Streamlit   │────▶│  Ingest      │────▶│ ChromaDB  │
+┌──────────────┐     ┌──────────────┐     ┌───────────┐
+│  Streamlit   │───▶│  Ingest      │────▶│ ChromaDB  │
 │  UI (app.py) │     │  Pipeline    │     │ (vectors) │
 │              │     │  (ingest.py) │     └───────────┘
 │              │     └──────────────┘           │
 │              │                                │
 │              │     ┌──────────────┐           │
-│              │────▶│  Query       │◀──────────┘
+│              │───▶│  Query       │◀──────────┘
 │              │     │  Pipeline    │
 │              │     │  (query.py)  │────▶ Claude API
 │              │     └──────────────┘     (answer gen)
 │              │
 │              │     ┌──────────────┐
-│              │────▶│  SQLite      │
+│              │───▶│  SQLite      │
 │              │     │  (db.py)     │
-└─────────────┘     └──────────────┘
+└──────────────┘     └──────────────┘
 ```
 
 ### Ingestion Pipeline (ingest.py)
