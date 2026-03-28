@@ -105,8 +105,8 @@ def fetch_youtube_transcript(url: str) -> str:
     if not video_id:
         raise ValueError(f"Could not extract video ID from URL: {url}")
 
-    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-    text = " ".join(entry["text"] for entry in transcript_list)
+    transcript_list = YouTubeTranscriptApi().fetch(video_id)
+    text = " ".join(entry.text for entry in transcript_list)
     # Clean up auto-generated transcript artefacts
     text = re.sub(r"\[.*?\]", "", text)   # remove [Music], [Applause] etc.
     text = re.sub(r" {2,}", " ", text)
