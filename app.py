@@ -50,6 +50,27 @@ def _tag_input(key: str, label: str = "Tags (comma-separated, optional)") -> lis
     return [t.strip() for t in raw.split(",") if t.strip()] if raw.strip() else []
 
 
+def _build_export_md(question: str, result: dict) -> str:
+    lines = [
+        f"# {question}",
+        f"*Exported from SecondBrain — {datetime.date.today()}*",
+        "",
+        "## Answer",
+        result["answer"],
+        "",
+        "## Sources",
+    ]
+    for i, src in enumerate(result.get("sources", []), 1):
+        lines.append(f"### {i}. {src['title']}")
+        if src.get("url"):
+            lines.append(f"**URL:** {src['url']}")
+        lines.append(f"**Score:** {src.get('score', 'n/a')}")
+        lines.append("")
+        lines.append(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # INGEST TAB
 # ---------------------------------------------------------------------------
@@ -238,27 +259,6 @@ with tab_ask:
                 file_name=f"secondbrain_{datetime.date.today()}.md",
                 mime="text/markdown",
             )
-
-
-def _build_export_md(question: str, result: dict) -> str:
-    lines = [
-        f"# {question}",
-        f"*Exported from SecondBrain — {datetime.date.today()}*",
-        "",
-        "## Answer",
-        result["answer"],
-        "",
-        "## Sources",
-    ]
-    for i, src in enumerate(result.get("sources", []), 1):
-        lines.append(f"### {i}. {src['title']}")
-        if src.get("url"):
-            lines.append(f"**URL:** {src['url']}")
-        lines.append(f"**Score:** {src.get('score', 'n/a')}")
-        lines.append("")
-        lines.append(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
-        lines.append("")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
