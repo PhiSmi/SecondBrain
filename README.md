@@ -88,15 +88,41 @@ SecondBrain uses **ChromaDB**, which:
 
 ### What Is Chunking?
 
-LLMs have limited context windows (the amount of text they can process at once), and embedding models produce better vectors from shorter, focused text than from long, rambling documents. Chunking is the process of breaking long content into smaller pieces.
+A chunk is simply a small piece of a larger document. When you ingest an article, you don't store it as one giant block of text — you slice it into smaller pieces, and each piece is a chunk.
 
-SecondBrain uses a simple but effective strategy:
+**The problem with storing a whole document as one unit:**
+
+Embedding models turn text into a vector that represents its meaning. If you embed an entire 5,000-word article, the vector becomes a blurry average of every topic in that article. When you ask "what are the reliability principles?", the whole-article vector might not score highly against your question — even if the answer is clearly in there somewhere.
+
+**What chunking solves:**
+
+Each chunk gets its own embedding — a precise vector for *that specific section's* meaning. When you ask a question, you find the 2–3 chunks most relevant to it, not the whole article.
+
+**Concrete example** — a 3,000-word AWS article splits into roughly 6 chunks:
+
+```
+Chunk 1: Introduction + overview
+Chunk 2: Reliability pillar — design principles
+Chunk 3: Reliability pillar — best practices
+Chunk 4: Security pillar — design principles
+Chunk 5: Security pillar — best practices
+Chunk 6: Summary
+```
+
+You ask: *"What are the reliability best practices?"*
+
+- Chunks 2 and 3 score ~0.85 similarity — sent to Claude
+- Chunks 4 and 5 score ~0.30 (security, not reliability) — ignored
+
+Only the relevant chunks reach Claude, keeping the answer focused and the API cost low.
+
+SecondBrain uses a simple but effective chunking strategy:
 
 1. **Split by paragraphs first** — natural boundaries in the text
 2. **Split by sentences if a paragraph is too long** — keeps chunks under the target size (~500 tokens)
-3. **Overlap between chunks** (~50 tokens) — ensures that information spanning a chunk boundary isn't lost. If a key fact starts at the end of chunk 3 and continues into chunk 4, the overlap means it appears in full in at least one chunk
+3. **Overlap between chunks** (~50 tokens) — if a key sentence falls right on the boundary between chunk 2 and chunk 3, it appears in both, so it's never lost
 
-**Why ~500 tokens?** It's a sweet spot. Too small (50 tokens) and you lose context — the chunk might be a single sentence ripped from its paragraph. Too large (2000 tokens) and the embedding becomes a blurry average of too many ideas, making retrieval less precise. 500 tokens is roughly a solid paragraph or two — enough context to be meaningful, focused enough to embed well.
+**Why ~500 tokens?** It's a sweet spot. Too small (50 tokens) and you lose context — the chunk might be a single sentence ripped from its paragraph. Too large (2,000 tokens) and the embedding becomes a blurry average of too many ideas, making retrieval less precise. 500 tokens is roughly a solid paragraph or two — enough context to be meaningful, focused enough to embed well.
 
 ### What Is an LLM (Large Language Model)?
 
