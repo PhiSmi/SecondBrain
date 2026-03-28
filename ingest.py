@@ -43,21 +43,53 @@ def _get_collection() -> chromadb.Collection:
 # Text extraction
 # ---------------------------------------------------------------------------
 
-def fetch_url_text(url: str) -> str:
-    """Download a URL and extract the main text content."""
-    resp = requests.get(url, timeout=15, headers={"User-Agent": "SecondBrain/1.0"})
+MIN_CONTENT_LENGTH = 200  # characters — below this we warn the user
+
+
+def fetch_url_text(url: str) -> tuple[str, bool]:
+    """Download a URL and extract the main text content.
+
+    Returns (text, js_warning) where js_warning=True means the page likely
+    requires JavaScript to render and the extracted text may be incomplete.
+    """
+    resp = requests.get(
+        url,
+        timeout=15,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SecondBrain/1.0)"},
+    )
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
     # Remove non-content elements
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
         tag.decompose()
 
-    text = soup.get_text(separator="\n")
+    # Try to find the main article body first — most news/blog sites use these
+    content_candidates = (
+        soup.find("article")
+        or soup.find("main")
+        or soup.find(attrs={"role": "main"})
+        or soup.find(id=re.compile(r"(content|article|main|body)", re.I))
+        or soup.find(class_=re.compile(r"(article|post|content|story|body)", re.I))
+    )
+
+    if content_candidates:
+        text = content_candidates.get_text(separator="\n")
+    else:
+        # Fall back to all paragraph tags, which are almost always static
+        paragraphs = soup.find_all("p")
+        if paragraphs:
+            text = "\n\n".join(p.get_text() for p in paragraphs)
+        else:
+            text = soup.get_text(separator="\n")
+
     # Collapse whitespace
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
+    text = text.strip()
+
+    js_warning = len(text) < MIN_CONTENT_LENGTH
+    return text, js_warning
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +169,14 @@ def ingest_text(text: str, title: str, source_type: str = "text", url: str | Non
     return len(chunks)
 
 
-def ingest_url(url: str, title: str | None = None) -> int:
-    """Fetch a URL, extract text, and ingest it. Returns chunk count."""
-    text = fetch_url_text(url)
+def ingest_url(url: str, title: str | None = None) -> tuple[int, bool]:
+    """Fetch a URL, extract text, and ingest it.
+
+    Returns (chunk_count, js_warning). js_warning=True means the page likely
+    needs JavaScript to render and the content may be incomplete.
+    """
+    text, js_warning = fetch_url_text(url)
     if not title:
         title = url
-    return ingest_text(text, title=title, source_type="url", url=url)
+    chunk_count = ingest_text(text, title=title, source_type="url", url=url)
+    return chunk_count, js_warning

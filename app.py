@@ -71,8 +71,16 @@ with tab_ingest:
             else:
                 with st.spinner("Fetching and processing..."):
                     try:
-                        chunk_count = ingest.ingest_url(url.strip(), title=title.strip() or None)
-                        st.success(f"Ingested **{chunk_count}** chunks from {url.strip()}")
+                        chunk_count, js_warning = ingest.ingest_url(url.strip(), title=title.strip() or None)
+                        if js_warning:
+                            st.warning(
+                                f"Only extracted a small amount of text ({chunk_count} chunk(s)) from this URL. "
+                                "The page likely requires JavaScript to render its content — "
+                                "BeautifulSoup can only read static HTML. "
+                                "Try copying the article text manually and using **Paste text** instead."
+                            )
+                        else:
+                            st.success(f"Ingested **{chunk_count}** chunks from {url.strip()}")
                     except Exception as e:
                         st.error(f"Failed to ingest URL: {e}")
 
