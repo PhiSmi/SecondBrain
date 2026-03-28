@@ -233,6 +233,7 @@ def ask(
     tags: list[str] | None = None,
     use_rerank: bool = True,
     hybrid: bool = True,
+    model_id: str | None = None,
 ) -> dict:
     """Full RAG pipeline. Returns {answer, sources, history}.
 
@@ -279,7 +280,7 @@ def ask(
 
     client = _get_anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=model_id or "claude-sonnet-4-20250514",
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=messages,
@@ -292,6 +293,72 @@ def ask(
     updated_history.append({"role": "assistant", "content": answer})
 
     return {"answer": answer, "sources": sources, "history": updated_history}
+
+
+def ask_stream(
+    question: str,
+    history: list[dict] | None = None,
+    tags: list[str] | None = None,
+    use_rerank: bool = True,
+    hybrid: bool = True,
+    model_id: str | None = None,
+):
+    """Streaming version of ask(). Yields (token, sources, updated_history) tuples.
+
+    On each yield: token is the new text fragment, sources is set once on first yield,
+    and updated_history is None until the final yield.
+    """
+    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid)
+
+    if not chunks:
+        yield (
+            "No content has been ingested yet. Add some text or URLs in the Ingest tab first.",
+            [],
+            history or [],
+        )
+        return
+
+    if use_rerank:
+        chunks = rerank(question, chunks, top_n=FINAL_K)
+    else:
+        chunks = chunks[:FINAL_K]
+
+    # Build context
+    context_parts = []
+    sources = []
+    for i, chunk in enumerate(chunks, 1):
+        meta = chunk["metadata"]
+        title = meta.get("title", "Unknown")
+        url = meta.get("url", "")
+        score = chunk.get("rerank_score", chunk.get("semantic_score", 0))
+        context_parts.append(f"--- Chunk {i} [Source: {title}] ---\n{chunk['text']}")
+        sources.append({"title": title, "url": url, "score": score, "text": chunk["text"]})
+
+    context = "\n\n".join(context_parts)
+
+    messages = list(history or [])
+    messages.append({
+        "role": "user",
+        "content": f"Context:\n{context}\n\nQuestion: {question}",
+    })
+
+    client = _get_anthropic()
+    full_answer = ""
+    with client.messages.stream(
+        model=model_id or "claude-sonnet-4-20250514",
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=messages,
+    ) as stream:
+        for text in stream.text_stream:
+            full_answer += text
+            yield (text, sources, None)
+
+    # Final yield with complete history
+    updated_history = list(history or [])
+    updated_history.append({"role": "user", "content": question})
+    updated_history.append({"role": "assistant", "content": full_answer})
+    yield ("", sources, updated_history)
 
 
 def summarise_source(source_id: int) -> str:

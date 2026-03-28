@@ -33,6 +33,15 @@ def _get_conn() -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+
+        CREATE TABLE IF NOT EXISTS search_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            question    TEXT    NOT NULL,
+            answer      TEXT    NOT NULL,
+            sources     TEXT    NOT NULL DEFAULT '[]',
+            tags_used   TEXT    NOT NULL DEFAULT '[]',
+            searched_at TEXT    NOT NULL
+        );
         """
     )
     conn.commit()
@@ -144,3 +153,79 @@ def get_chroma_ids_for_source(source_id: int) -> list[str]:
     ).fetchall()
     conn.close()
     return [r["chroma_id"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Search history
+# ---------------------------------------------------------------------------
+
+def log_search(question: str, answer: str, sources: list[dict], tags_used: list[str]) -> None:
+    """Record a search query and its answer."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO search_history (question, answer, sources, tags_used, searched_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (question, answer, json.dumps(sources), json.dumps(tags_used),
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_search_history(limit: int = 50) -> list[dict]:
+    """Return recent search history, newest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM search_history ORDER BY searched_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["sources"] = json.loads(d.get("sources") or "[]")
+        d["tags_used"] = json.loads(d.get("tags_used") or "[]")
+        result.append(d)
+    return result
+
+
+def delete_search_history() -> int:
+    """Delete all search history. Returns count of deleted rows."""
+    conn = _get_conn()
+    cur = conn.execute("DELETE FROM search_history")
+    conn.commit()
+    count = cur.rowcount
+    conn.close()
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+
+def get_stats() -> dict:
+    """Return aggregate stats about the knowledge base."""
+    conn = _get_conn()
+    source_count = conn.execute("SELECT COUNT(*) as c FROM sources").fetchone()["c"]
+    chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
+    query_count = conn.execute("SELECT COUNT(*) as c FROM search_history").fetchone()["c"]
+
+    type_counts = conn.execute(
+        "SELECT source_type, COUNT(*) as c FROM sources GROUP BY source_type ORDER BY c DESC"
+    ).fetchall()
+
+    tag_counts = conn.execute("SELECT tags FROM sources").fetchall()
+    conn.close()
+
+    # Compute tag frequency
+    tag_freq: dict[str, int] = {}
+    for r in tag_counts:
+        for tag in json.loads(r["tags"] or "[]"):
+            tag_freq[tag] = tag_freq.get(tag, 0) + 1
+
+    return {
+        "source_count": source_count,
+        "chunk_count": chunk_count,
+        "query_count": query_count,
+        "type_breakdown": {r["source_type"]: r["c"] for r in type_counts},
+        "tag_frequency": dict(sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)),
+    }

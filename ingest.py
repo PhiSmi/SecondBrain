@@ -90,6 +90,24 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     return "\n\n".join(text_parts)
 
 
+def extract_docx_text(file_bytes: bytes) -> str:
+    """Extract text from a DOCX file (bytes)."""
+    import io
+    import zipfile
+    from xml.etree import ElementTree
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+        xml_content = z.read("word/document.xml")
+    tree = ElementTree.fromstring(xml_content)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs = []
+    for p in tree.iter(f"{{{ns['w']}}}p"):
+        texts = [t.text for t in p.iter(f"{{{ns['w']}}}t") if t.text]
+        if texts:
+            paragraphs.append("".join(texts))
+    return "\n\n".join(paragraphs)
+
+
 def fetch_youtube_transcript(url: str) -> str:
     """Extract transcript text from a YouTube URL."""
     # Extract video ID from various YouTube URL formats
@@ -275,6 +293,34 @@ def ingest_pdf(
     return ingest_text(text, title=title, source_type="pdf", tags=tags)
 
 
+def ingest_docx(
+    file_bytes: bytes,
+    title: str,
+    tags: list[str] | None = None,
+) -> int:
+    """Extract text from a DOCX and ingest it. Returns chunk count."""
+    text = extract_docx_text(file_bytes)
+    return ingest_text(text, title=title, source_type="docx", tags=tags)
+
+
+def ingest_file(
+    file_bytes: bytes,
+    filename: str,
+    title: str,
+    tags: list[str] | None = None,
+) -> int:
+    """Ingest a file based on its extension. Returns chunk count."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        return ingest_pdf(file_bytes, title=title, tags=tags)
+    elif ext == "docx":
+        return ingest_docx(file_bytes, title=title, tags=tags)
+    else:
+        # Treat as plain text (.txt, .md, .csv, etc.)
+        text = file_bytes.decode("utf-8", errors="replace")
+        return ingest_text(text, title=title, source_type="file", tags=tags)
+
+
 def ingest_youtube(
     url: str,
     title: str | None = None,
@@ -310,6 +356,96 @@ def delete_source(source_id: int) -> None:
     if chroma_ids:
         collection.delete(ids=chroma_ids)
     db.delete_source(source_id)
+
+
+def export_knowledge_base() -> dict:
+    """Export the entire knowledge base as a JSON-serialisable dict."""
+    sources = db.get_all_sources()
+    export_data = {"version": 1, "exported_at": None, "sources": []}
+    from datetime import datetime, timezone
+    export_data["exported_at"] = datetime.now(timezone.utc).isoformat()
+
+    for src in sources:
+        chunks = db.get_chunks_for_source(src["id"])
+        export_data["sources"].append({
+            "title": src["title"],
+            "source_type": src["source_type"],
+            "url": src.get("url"),
+            "tags": src.get("tags", []),
+            "ingested_at": src["ingested_at"],
+            "chunks": [{"text": c["text"], "chunk_index": c["chunk_index"]} for c in chunks],
+        })
+    return export_data
+
+
+def import_knowledge_base(data: dict) -> dict:
+    """Import a previously exported knowledge base. Returns summary stats."""
+    imported = 0
+    skipped = 0
+    existing_titles = {s["title"] for s in db.get_all_sources()}
+
+    for src in data.get("sources", []):
+        if src["title"] in existing_titles:
+            skipped += 1
+            continue
+
+        chunks_text = [c["text"] for c in src.get("chunks", [])]
+        if not chunks_text:
+            skipped += 1
+            continue
+
+        _embed_and_store(
+            chunks_text,
+            title=src["title"],
+            source_type=src.get("source_type", "text"),
+            url=src.get("url"),
+            tags=src.get("tags"),
+        )
+        imported += 1
+
+    return {"imported": imported, "skipped": skipped}
+
+
+def find_duplicate_chunks(threshold: float = 0.95) -> list[dict]:
+    """Find near-duplicate chunks using cosine similarity. Returns pairs above threshold."""
+    collection = _get_collection()
+    total = collection.count()
+    if total < 2:
+        return []
+
+    # Get all chunks (limit to 500 for performance)
+    limit = min(total, 500)
+    all_data = collection.get(limit=limit, include=["documents", "metadatas", "embeddings"])
+
+    if not all_data["embeddings"]:
+        return []
+
+    import numpy as np
+    embeddings = np.array(all_data["embeddings"])
+    # Normalize for cosine similarity
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    normed = embeddings / norms
+    sim_matrix = normed @ normed.T
+
+    duplicates = []
+    seen = set()
+    for i in range(len(sim_matrix)):
+        for j in range(i + 1, len(sim_matrix)):
+            if sim_matrix[i][j] >= threshold:
+                pair_key = (all_data["ids"][i], all_data["ids"][j])
+                if pair_key not in seen:
+                    seen.add(pair_key)
+                    duplicates.append({
+                        "chunk_a_id": all_data["ids"][i],
+                        "chunk_b_id": all_data["ids"][j],
+                        "title_a": all_data["metadatas"][i].get("title", "Unknown"),
+                        "title_b": all_data["metadatas"][j].get("title", "Unknown"),
+                        "similarity": round(float(sim_matrix[i][j]), 4),
+                        "text_a": all_data["documents"][i][:200],
+                        "text_b": all_data["documents"][j][:200],
+                    })
+    return sorted(duplicates, key=lambda x: x["similarity"], reverse=True)[:50]
 
 
 def reingest_source(source_id: int) -> int:
