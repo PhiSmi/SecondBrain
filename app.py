@@ -1,6 +1,7 @@
 """SecondBrain — Streamlit UI."""
 
 import datetime
+import json
 
 import streamlit as st
 
@@ -9,6 +10,12 @@ import ingest
 import query
 
 st.set_page_config(page_title="SecondBrain", page_icon="🧠", layout="wide")
+
+# Available Claude models for the LLM picker
+CLAUDE_MODELS = {
+    "Claude Sonnet 4 (default)": "claude-sonnet-4-20250514",
+    "Claude Haiku 3.5 (fast, cheap)": "claude-3-5-haiku-20241022",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +45,9 @@ if not _check_password():
 st.title("🧠 SecondBrain")
 st.caption("Your personal RAG-powered knowledge base")
 
-tab_ingest, tab_ask, tab_sources = st.tabs(["Ingest", "Ask", "Sources"])
+tab_ingest, tab_ask, tab_history, tab_sources, tab_analytics = st.tabs(
+    ["Ingest", "Ask", "History", "Sources", "Analytics"]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +89,7 @@ with tab_ingest:
 
     input_type = st.radio(
         "Input type",
-        ["Paste text", "URL", "PDF", "YouTube", "Bulk URLs"],
+        ["Paste text", "URL", "File upload", "YouTube", "Bulk URLs"],
         horizontal=True,
     )
 
@@ -121,19 +130,23 @@ with tab_ingest:
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
-    # ---- PDF ----
-    elif input_type == "PDF":
-        uploaded = st.file_uploader("Upload a PDF", type="pdf")
+    # ---- File upload (PDF, DOCX, TXT, MD, CSV) ----
+    elif input_type == "File upload":
+        uploaded = st.file_uploader(
+            "Upload a file",
+            type=["pdf", "docx", "txt", "md", "csv", "json", "rst"],
+            help="Supported: PDF, DOCX, TXT, Markdown, CSV, JSON, RST",
+        )
         title = st.text_input("Title", placeholder="e.g. AWS Security Whitepaper")
-        tags = _tag_input("tags_pdf")
-        if st.button("Ingest PDF", type="primary"):
+        tags = _tag_input("tags_file")
+        if st.button("Ingest file", type="primary"):
             if uploaded is None:
-                st.error("Please upload a PDF file.")
+                st.error("Please upload a file.")
             elif not title.strip():
                 st.error("Please provide a title.")
             else:
                 with st.spinner("Extracting and embedding..."):
-                    n = ingest.ingest_pdf(uploaded.read(), title=title.strip(), tags=tags)
+                    n = ingest.ingest_file(uploaded.read(), uploaded.name, title=title.strip(), tags=tags)
                 st.success(f"Ingested **{n}** chunks from \"{title.strip()}\"")
 
     # ---- YouTube ----
@@ -166,11 +179,22 @@ with tab_ingest:
                     results = ingest.ingest_bulk_urls(urls, tags=tags)
                 for r in results:
                     if r["error"]:
-                        st.error(f"❌ {r['url']} — {r['error']}")
+                        st.error(f"{r['url']} — {r['error']}")
                     elif r["warning"]:
-                        st.warning(f"⚠️ {r['url']} — {r['chunks']} chunks (JS-rendered, content may be partial)")
+                        st.warning(f"{r['url']} — {r['chunks']} chunks (JS-rendered, content may be partial)")
                     else:
-                        st.success(f"✓ {r['url']} — {r['chunks']} chunks")
+                        st.success(f"{r['url']} — {r['chunks']} chunks")
+
+    # ---- Import knowledge base ----
+    st.markdown("---")
+    st.subheader("Import Knowledge Base")
+    import_file = st.file_uploader("Upload a SecondBrain export (.json)", type=["json"], key="import_kb")
+    if import_file and st.button("Import", type="secondary"):
+        with st.spinner("Importing..."):
+            data = json.loads(import_file.read().decode("utf-8"))
+            result = ingest.import_knowledge_base(data)
+        st.success(f"Imported **{result['imported']}** sources, skipped {result['skipped']} duplicates.")
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -180,9 +204,9 @@ with tab_ingest:
 with tab_ask:
     st.header("Ask Your Knowledge Base")
 
-    # Sidebar-style options inside the tab
+    # Search options
     with st.expander("Search options", expanded=False):
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             use_hybrid = st.toggle("Hybrid search (BM25 + semantic)", value=True,
                                    help="Combines keyword and semantic search for better recall")
@@ -192,6 +216,10 @@ with tab_ask:
             all_tags = db.get_all_tags()
             selected_tags = st.multiselect("Filter by tags", options=all_tags,
                                            help="Leave empty to search all sources")
+        with col3:
+            model_choice = st.selectbox("Claude model", options=list(CLAUDE_MODELS.keys()))
+            use_streaming = st.toggle("Stream response", value=True,
+                                      help="Show the answer as it's generated, token by token")
 
     question = st.text_input("Your question", placeholder="What are the key reliability design principles?")
 
@@ -201,16 +229,56 @@ with tab_ask:
     with col_clear:
         if st.button("Clear conversation"):
             st.session_state.pop("chat_history", None)
+            st.session_state.pop("last_result", None)
+            st.session_state.pop("last_question", None)
             st.rerun()
 
     # Conversation history lives in session state
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
+    model_id = CLAUDE_MODELS[model_choice]
+
     if ask_clicked:
         if not question.strip():
             st.error("Please enter a question.")
+        elif use_streaming:
+            # Streaming mode
+            sources = []
+            answer_placeholder = st.empty()
+            full_answer = ""
+            final_history = None
+
+            with st.spinner("Retrieving relevant chunks..."):
+                stream = query.ask_stream(
+                    question.strip(),
+                    history=st.session_state["chat_history"],
+                    tags=selected_tags or None,
+                    use_rerank=use_rerank,
+                    hybrid=use_hybrid,
+                    model_id=model_id,
+                )
+                first = True
+                for token, srcs, updated_history in stream:
+                    if first:
+                        sources = srcs
+                        first = False
+                    full_answer += token
+                    answer_placeholder.markdown(full_answer + "▌")
+                    if updated_history is not None:
+                        final_history = updated_history
+
+            answer_placeholder.markdown(full_answer)
+
+            if final_history:
+                st.session_state["chat_history"] = final_history
+            st.session_state["last_result"] = {"answer": full_answer, "sources": sources}
+            st.session_state["last_question"] = question.strip()
+
+            # Log to search history
+            db.log_search(question.strip(), full_answer, sources, selected_tags or [])
         else:
+            # Non-streaming mode
             with st.spinner("Searching and generating answer..."):
                 result = query.ask(
                     question.strip(),
@@ -218,12 +286,14 @@ with tab_ask:
                     tags=selected_tags or None,
                     use_rerank=use_rerank,
                     hybrid=use_hybrid,
+                    model_id=model_id,
                 )
             st.session_state["chat_history"] = result["history"]
-
-            # Store last result for export
             st.session_state["last_result"] = result
             st.session_state["last_question"] = question.strip()
+
+            # Log to search history
+            db.log_search(question.strip(), result["answer"], result.get("sources", []), selected_tags or [])
 
     # Display full conversation
     if st.session_state["chat_history"]:
@@ -262,14 +332,66 @@ with tab_ask:
 
 
 # ---------------------------------------------------------------------------
+# HISTORY TAB
+# ---------------------------------------------------------------------------
+
+with tab_history:
+    st.header("Search History")
+
+    history_items = db.get_search_history(limit=50)
+
+    if not history_items:
+        st.info("No searches yet. Ask a question in the Ask tab to get started.")
+    else:
+        col_count, col_clear = st.columns([3, 1])
+        with col_count:
+            st.caption(f"Showing {len(history_items)} most recent searches")
+        with col_clear:
+            if st.button("Clear all history", type="secondary"):
+                db.delete_search_history()
+                st.rerun()
+
+        for item in history_items:
+            searched_at = item["searched_at"][:16].replace("T", " ")
+            tags_str = ", ".join(item.get("tags_used", [])) if item.get("tags_used") else "all"
+            with st.expander(f"{searched_at} — {item['question'][:80]}"):
+                st.markdown(f"**Tags:** {tags_str}")
+                st.markdown("**Answer:**")
+                st.markdown(item["answer"])
+                if item.get("sources"):
+                    st.markdown("**Sources:**")
+                    for src in item["sources"][:3]:
+                        st.caption(f"- {src.get('title', 'Unknown')} (score: {src.get('score', 'n/a')})")
+
+                # Re-ask button
+                if st.button("Re-ask this question", key=f"reask_{item['id']}"):
+                    st.session_state["reask_question"] = item["question"]
+                    st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # SOURCES TAB
 # ---------------------------------------------------------------------------
 
 with tab_sources:
     st.header("Ingested Sources")
 
-    all_tags_filter = db.get_all_tags()
-    filter_tags = st.multiselect("Filter by tag", options=all_tags_filter, key="src_filter_tags")
+    # Export knowledge base
+    col_filter, col_export = st.columns([3, 1])
+    with col_filter:
+        all_tags_filter = db.get_all_tags()
+        filter_tags = st.multiselect("Filter by tag", options=all_tags_filter, key="src_filter_tags")
+    with col_export:
+        if st.button("Export entire KB"):
+            with st.spinner("Exporting..."):
+                export_data = ingest.export_knowledge_base()
+            st.download_button(
+                label="Download export",
+                data=json.dumps(export_data, indent=2),
+                file_name=f"secondbrain_export_{datetime.date.today()}.json",
+                mime="application/json",
+            )
+
     sources = db.get_all_sources()
 
     if filter_tags:
@@ -324,3 +446,66 @@ with tab_sources:
                             disabled=True,
                             key=f"chunk_text_{c['id']}",
                         )
+
+
+# ---------------------------------------------------------------------------
+# ANALYTICS TAB
+# ---------------------------------------------------------------------------
+
+with tab_analytics:
+    st.header("Knowledge Base Analytics")
+
+    stats = db.get_stats()
+
+    # Top-level metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Sources", stats["source_count"])
+    with col2:
+        st.metric("Total Chunks", stats["chunk_count"])
+    with col3:
+        st.metric("Total Queries", stats["query_count"])
+
+    st.markdown("---")
+
+    # Source type breakdown
+    col_types, col_tags = st.columns(2)
+
+    with col_types:
+        st.subheader("Sources by Type")
+        if stats["type_breakdown"]:
+            for stype, count in stats["type_breakdown"].items():
+                st.markdown(f"- **{stype}**: {count}")
+        else:
+            st.caption("No sources yet.")
+
+    with col_tags:
+        st.subheader("Tag Frequency")
+        if stats["tag_frequency"]:
+            for tag, count in list(stats["tag_frequency"].items())[:15]:
+                st.markdown(f"- **{tag}**: {count} source(s)")
+        else:
+            st.caption("No tags yet.")
+
+    # Deduplication check
+    st.markdown("---")
+    st.subheader("Duplicate Detection")
+    st.caption("Find near-duplicate chunks that may be wasting space or skewing results.")
+    if st.button("Scan for duplicates"):
+        with st.spinner("Comparing chunk embeddings..."):
+            dupes = ingest.find_duplicate_chunks(threshold=0.95)
+        if not dupes:
+            st.success("No near-duplicate chunks found.")
+        else:
+            st.warning(f"Found **{len(dupes)}** near-duplicate chunk pair(s).")
+            for d in dupes[:20]:
+                with st.expander(
+                    f"Similarity {d['similarity']:.2%} — {d['title_a']} / {d['title_b']}"
+                ):
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown(f"**{d['title_a']}**")
+                        st.text(d["text_a"])
+                    with col_b:
+                        st.markdown(f"**{d['title_b']}**")
+                        st.text(d["text_b"])

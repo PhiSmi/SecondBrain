@@ -396,16 +396,19 @@ Most YouTube videos have auto-generated captions (YouTube's own speech-to-text).
 ### Ingestion
 - **Paste text** — copy-paste anything, give it a title
 - **URL** — fetches and extracts web page content (with JS-rendering detection)
-- **PDF upload** — extracts text including tables via pdfplumber
+- **File upload** — PDF, DOCX, TXT, Markdown, CSV, JSON, and RST files
 - **YouTube** — pulls auto-generated or community transcripts (local only)
 - **Bulk URLs** — paste a list of URLs, ingest them all at once
 - **Tagging** — tag sources on ingest or edit tags later
+- **KB import** — import a previously exported SecondBrain knowledge base
 
 ### Retrieval
 - **Hybrid search** — combines semantic (embedding) and keyword (BM25) search via Reciprocal Rank Fusion
 - **Cross-encoder reranking** — optional second-pass ranking for higher precision
 - **Tag filtering** — scope queries to specific topics
 - **Conversation history** — multi-turn Q&A within a session
+- **Streaming responses** — answers appear token by token as Claude generates them
+- **Model picker** — choose between Claude Sonnet 4 (default) or Haiku 3.5 (fast/cheap)
 
 ### Source Management
 - **View all chunks** for any source
@@ -413,6 +416,12 @@ Most YouTube videos have auto-generated captions (YouTube's own speech-to-text).
 - **Summarise** — AI-generated bullet-point summary of any source
 - **Re-ingest** — re-embed all chunks (useful after switching embedding models)
 - **Delete** — removes source + all vectors from ChromaDB and SQLite
+- **Export KB** — download your entire knowledge base as a JSON file for backup or migration
+
+### Analytics & History
+- **Search history** — browse, review, and re-ask past queries
+- **KB analytics** — total sources, chunks, queries, source type breakdown, tag frequency
+- **Duplicate detection** — scan for near-duplicate chunks using cosine similarity on embeddings
 
 ### Output
 - **Markdown export** — download the last answer + sources as a `.md` file
@@ -481,10 +490,10 @@ SecondBrain/
 │   ├── config.toml             # Streamlit server config (file watcher, logging)
 │   ├── secrets.toml            # Local secrets (git-ignored)
 │   └── secrets.toml.example    # Template for secrets
-├── app.py                      # Streamlit UI — Ingest, Ask, Sources tabs
-├── ingest.py                   # Ingestion pipeline — all content types + chunking
-├── query.py                    # Retrieval — hybrid search, reranking, generation
-├── db.py                       # SQLite — sources, chunks, tags
+├── app.py                      # Streamlit UI — Ingest, Ask, History, Sources, Analytics tabs
+├── ingest.py                   # Ingestion pipeline — all content types + chunking + export/import
+├── query.py                    # Retrieval — hybrid search, reranking, streaming generation
+├── db.py                       # SQLite — sources, chunks, tags, search history, analytics
 ├── requirements.txt            # Python dependencies
 ├── .env                        # Anthropic API key (git-ignored)
 ├── .env.example                # Template for .env
@@ -505,7 +514,7 @@ SecondBrain/
 | `TOP_K` | query.py | 10 | Candidates retrieved before reranking |
 | `FINAL_K` | query.py | 5 | Chunks sent to Claude after reranking |
 | `RRF_K` | query.py | 60 | RRF merge constant |
-| `model` | query.py | claude-sonnet-4-20250514 | Claude model for answer generation |
+| `model` | query.py / app.py | claude-sonnet-4-20250514 | Claude model for answer generation (selectable in UI) |
 
 ---
 
@@ -513,7 +522,7 @@ SecondBrain/
 
 GitHub Actions runs on every push and pull request to `main`:
 
-1. **Matrix build** — tests against Python 3.11 and 3.12
+1. **Matrix build** — tests against Python 3.11, 3.12, and 3.13
 2. **Dependency caching** — pip packages are cached to speed up runs
 3. **Linting** — `ruff check .` catches style issues and common bugs
 4. **Import verification** — ensures all modules load without errors
@@ -523,11 +532,11 @@ GitHub Actions runs on every push and pull request to `main`:
 
 ## Current Limitations
 
-- **Cloud IP blocking** — YouTube, Reddit, and some news sites block requests from cloud provider IPs. Use Paste text or PDF upload on Streamlit Cloud
+- **Cloud IP blocking** — YouTube, Reddit, and some news sites block requests from cloud provider IPs. Use Paste text or file upload on Streamlit Cloud
 - **Static HTML only for URLs** — JavaScript-rendered pages return minimal content. The app detects this and warns you
 - **1GB RAM on Streamlit Cloud** — reranking is off by default to avoid out-of-memory crashes. Enable it locally
 - **No authentication beyond password gate** — the password check is a simple gate, not production-grade auth
-- **No conversation persistence** — chat history exists within a session but doesn't persist across page reloads
+- **Session-scoped conversation** — chat history exists within a session but search history is persisted in SQLite
 
 ---
 
