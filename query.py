@@ -8,7 +8,7 @@ import chromadb
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent / ".env", override=False)  # no-op if .env absent
 
 CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "secondbrain"
