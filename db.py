@@ -1,5 +1,6 @@
 """SQLite metadata helpers for tracking ingested sources."""
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,28 +12,57 @@ def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute(
+    conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            source_type TEXT NOT NULL,  -- 'text' or 'url'
-            url TEXT,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT    NOT NULL,
+            source_type TEXT    NOT NULL,
+            url         TEXT,
             chunk_count INTEGER NOT NULL,
-            ingested_at TEXT NOT NULL
-        )
+            tags        TEXT    NOT NULL DEFAULT '[]',
+            ingested_at TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chunks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            chroma_id   TEXT    NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            text        TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
         """
     )
     conn.commit()
     return conn
 
 
-def log_source(title: str, source_type: str, url: str | None, chunk_count: int) -> int:
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+
+def log_source(
+    title: str,
+    source_type: str,
+    url: str | None,
+    chunk_count: int,
+    tags: list[str] | None = None,
+) -> int:
     """Record a newly ingested source. Returns the source id."""
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO sources (title, source_type, url, chunk_count, ingested_at) VALUES (?, ?, ?, ?, ?)",
-        (title, source_type, url, chunk_count, datetime.now(timezone.utc).isoformat()),
+        """INSERT INTO sources (title, source_type, url, chunk_count, tags, ingested_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            title,
+            source_type,
+            url,
+            chunk_count,
+            json.dumps(tags or []),
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     conn.commit()
     source_id = cur.lastrowid
@@ -45,12 +75,72 @@ def get_all_sources() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute("SELECT * FROM sources ORDER BY ingested_at DESC").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["tags"] = json.loads(d.get("tags") or "[]")
+        result.append(d)
+    return result
+
+
+def get_all_tags() -> list[str]:
+    """Return a sorted list of every unique tag in use."""
+    conn = _get_conn()
+    rows = conn.execute("SELECT tags FROM sources").fetchall()
+    conn.close()
+    tags: set[str] = set()
+    for r in rows:
+        tags.update(json.loads(r["tags"] or "[]"))
+    return sorted(tags)
+
+
+def update_source_tags(source_id: int, tags: list[str]) -> None:
+    conn = _get_conn()
+    conn.execute("UPDATE sources SET tags = ? WHERE id = ?", (json.dumps(tags), source_id))
+    conn.commit()
+    conn.close()
 
 
 def delete_source(source_id: int) -> None:
-    """Delete a source record by id."""
+    """Delete a source record and all its chunks."""
     conn = _get_conn()
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Chunks
+# ---------------------------------------------------------------------------
+
+def log_chunks(source_id: int, chroma_ids: list[str], texts: list[str]) -> None:
+    """Store chunk text and chroma IDs for a source."""
+    conn = _get_conn()
+    conn.executemany(
+        "INSERT INTO chunks (source_id, chroma_id, chunk_index, text) VALUES (?, ?, ?, ?)",
+        [(source_id, cid, i, text) for i, (cid, text) in enumerate(zip(chroma_ids, texts))],
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chunks_for_source(source_id: int) -> list[dict]:
+    """Return all chunks for a source, in order."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM chunks WHERE source_id = ? ORDER BY chunk_index",
+        (source_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_chroma_ids_for_source(source_id: int) -> list[str]:
+    """Return all ChromaDB IDs for chunks belonging to a source."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT chroma_id FROM chunks WHERE source_id = ?", (source_id,)
+    ).fetchall()
+    conn.close()
+    return [r["chroma_id"] for r in rows]

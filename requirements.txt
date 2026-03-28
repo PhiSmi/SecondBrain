@@ -5,3 +5,5 @@ anthropic
 python-dotenv
 beautifulsoup4
 requests
+pdfplumber
+youtube-transcript-api
