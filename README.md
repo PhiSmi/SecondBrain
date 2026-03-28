@@ -302,7 +302,7 @@ Question: What are the key reliability principles?"
 
 Streamlit turns Python scripts into web apps. `app.py` is a regular Python file — Streamlit re-runs it from top to bottom on every user interaction (button click, text input, etc.). Session state persists between re-runs.
 
-**Why Streamlit:** Zero frontend code. No HTML, CSS, JavaScript, React, or build tools. The entire UI is defined in ~280 lines of Python. For a personal tool, this is the right trade-off — you sacrifice customisation for development speed.
+**Why Streamlit:** Zero frontend code. No HTML, CSS, JavaScript, React, or build tools. The entire UI is defined in ~500 lines of Python. For a personal tool, this is the right trade-off — you sacrifice customisation for development speed.
 
 ### BeautifulSoup — Web Scraping
 
