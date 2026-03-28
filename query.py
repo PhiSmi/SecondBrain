@@ -7,6 +7,8 @@ Supports:
 - Cross-encoder reranking
 - Multi-turn conversation history
 - Source summarisation
+- Streaming responses
+- Configurable similarity threshold
 """
 
 import math
@@ -20,17 +22,20 @@ import chromadb
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
+import config
+
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
+_cfg = config.retrieval()
 CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "secondbrain"
-TOP_K = 10          # retrieve more, then rerank down to FINAL_K
-FINAL_K = 5         # chunks sent to Claude after reranking
-RRF_K = 60          # constant for Reciprocal Rank Fusion
+TOP_K = _cfg.get("top_k", 10)
+FINAL_K = _cfg.get("final_k", 5)
+RRF_K = _cfg.get("rrf_k", 60)
 
-_embed_model: SentenceTransformer | None = None
+_embed_models: dict[str, SentenceTransformer] = {}
 _rerank_model = None  # CrossEncoder, lazy-loaded
-_collection: chromadb.Collection | None = None
+_collections: dict[str, chromadb.Collection] = {}
 _client: anthropic.Anthropic | None = None
 
 SYSTEM_PROMPT = """You are a helpful research assistant with access to the user's personal knowledge base. Follow these rules:
@@ -46,11 +51,11 @@ Produce exactly 5–7 bullet points. Each bullet should capture a distinct key i
 Be concise — each bullet should be one sentence. Do not add any preamble or closing remarks."""
 
 
-def _get_embed_model() -> SentenceTransformer:
-    global _embed_model
-    if _embed_model is None:
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
+def _get_embed_model(model_id: str | None = None) -> SentenceTransformer:
+    model_id = model_id or "all-MiniLM-L6-v2"
+    if model_id not in _embed_models:
+        _embed_models[model_id] = SentenceTransformer(model_id)
+    return _embed_models[model_id]
 
 
 def _get_rerank_model():
@@ -62,15 +67,20 @@ def _get_rerank_model():
     return _rerank_model
 
 
-def _get_collection() -> chromadb.Collection:
-    global _collection
-    if _collection is None:
+def _collection_name(workspace: str | None = None) -> str:
+    ws = workspace or config.workspaces().get("default", "default")
+    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+
+
+def _get_collection(workspace: str | None = None) -> chromadb.Collection:
+    name = _collection_name(workspace)
+    if name not in _collections:
         client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        _collection = client.get_or_create_collection(
-            name=COLLECTION_NAME,
+        _collections[name] = client.get_or_create_collection(
+            name=name,
             metadata={"hnsw:space": "cosine"},
         )
-    return _collection
+    return _collections[name]
 
 
 def _get_anthropic() -> anthropic.Anthropic:
@@ -97,7 +107,6 @@ def _bm25_scores(query: str, documents: list[str], k1: float = 1.5, b: float = 0
     avg_dl = sum(len(d) for d in tokenised_docs) / len(tokenised_docs)
     query_terms = _tokenise(query)
 
-    # IDF for each query term
     idf: dict[str, float] = {}
     N = len(documents)
     for term in set(query_terms):
@@ -141,6 +150,9 @@ def retrieve(
     top_k: int = TOP_K,
     tags: list[str] | None = None,
     hybrid: bool = True,
+    min_similarity: float = 0.0,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> list[dict]:
     """Retrieve the top-k most relevant chunks.
 
@@ -149,12 +161,15 @@ def retrieve(
         top_k: Number of candidates to retrieve before reranking.
         tags: If provided, only return chunks from sources with these tags.
         hybrid: If True, merge semantic + BM25 results via RRF.
+        min_similarity: Filter out chunks below this cosine similarity score.
+        workspace: Which workspace collection to search.
+        embed_model_id: Which embedding model to use for the query.
 
     Returns:
         List of chunk dicts with keys: id, text, metadata, semantic_score.
     """
-    model = _get_embed_model()
-    collection = _get_collection()
+    model = _get_embed_model(embed_model_id)
+    collection = _get_collection(workspace)
 
     total = collection.count()
     if total == 0:
@@ -162,14 +177,10 @@ def retrieve(
 
     n = min(top_k, total)
 
-    # Build ChromaDB where clause for tag filtering
     where: dict | None = None
     if tags:
-        # ChromaDB metadata stores tags as comma-separated string
-        # Use $or across individual tag matches
         where = {"$or": [{"tags": {"$contains": tag}} for tag in tags]} if len(tags) > 1 else {"tags": {"$contains": tags[0]}}
 
-    # --- Semantic retrieval ---
     query_vec = model.encode([question], show_progress_bar=False).tolist()
     sem_results = collection.query(
         query_embeddings=query_vec,
@@ -183,26 +194,27 @@ def retrieve(
     sem_dists = sem_results["distances"][0]
     sem_ids = sem_results["ids"][0]
 
-    # Build a lookup: id → {text, metadata, semantic_score}
     chunk_map: dict[str, dict] = {}
     for doc, meta, dist, cid in zip(sem_docs, sem_metas, sem_dists, sem_ids):
-        chunk_map[cid] = {
-            "id": cid,
-            "text": doc,
-            "metadata": meta,
-            "semantic_score": round(1 - dist, 3),
-        }
+        score = round(1 - dist, 3)
+        if score >= min_similarity:
+            chunk_map[cid] = {
+                "id": cid,
+                "text": doc,
+                "metadata": meta,
+                "semantic_score": score,
+            }
+
+    filtered_ids = [cid for cid in sem_ids if cid in chunk_map]
 
     if not hybrid:
-        return [chunk_map[cid] for cid in sem_ids]
+        return [chunk_map[cid] for cid in filtered_ids]
 
-    # --- BM25 retrieval over the same candidate set ---
-    sem_texts = [chunk_map[cid]["text"] for cid in sem_ids]
+    sem_texts = [chunk_map[cid]["text"] for cid in filtered_ids]
     bm25 = _bm25_scores(question, sem_texts)
-    bm25_ranked = [sem_ids[i] for i in sorted(range(len(bm25)), key=lambda x: bm25[x], reverse=True)]
+    bm25_ranked = [filtered_ids[i] for i in sorted(range(len(bm25)), key=lambda x: bm25[x], reverse=True)]
 
-    # Merge via RRF
-    merged_ids = _rrf_merge([sem_ids, bm25_ranked])
+    merged_ids = _rrf_merge([filtered_ids, bm25_ranked])
 
     return [chunk_map[cid] for cid in merged_ids if cid in chunk_map]
 
@@ -227,38 +239,8 @@ def rerank(question: str, chunks: list[dict], top_n: int = FINAL_K) -> list[dict
 # Answer generation
 # ---------------------------------------------------------------------------
 
-def ask(
-    question: str,
-    history: list[dict] | None = None,
-    tags: list[str] | None = None,
-    use_rerank: bool = True,
-    hybrid: bool = True,
-    model_id: str | None = None,
-) -> dict:
-    """Full RAG pipeline. Returns {answer, sources, history}.
-
-    Args:
-        question: The user's question.
-        history: Prior conversation turns [{role, content}, ...].
-        tags: Restrict retrieval to sources with these tags.
-        use_rerank: Whether to apply cross-encoder reranking.
-        hybrid: Whether to use hybrid BM25 + semantic search.
-    """
-    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid)
-
-    if not chunks:
-        return {
-            "answer": "No content has been ingested yet. Add some text or URLs in the Ingest tab first.",
-            "sources": [],
-            "history": history or [],
-        }
-
-    if use_rerank:
-        chunks = rerank(question, chunks, top_n=FINAL_K)
-    else:
-        chunks = chunks[:FINAL_K]
-
-    # Build context
+def _build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
+    """Build context string and sources list from chunks."""
     context_parts = []
     sources = []
     for i, chunk in enumerate(chunks, 1):
@@ -268,10 +250,41 @@ def ask(
         score = chunk.get("rerank_score", chunk.get("semantic_score", 0))
         context_parts.append(f"--- Chunk {i} [Source: {title}] ---\n{chunk['text']}")
         sources.append({"title": title, "url": url, "score": score, "text": chunk["text"]})
+    return "\n\n".join(context_parts), sources
 
-    context = "\n\n".join(context_parts)
 
-    # Build message history
+def ask(
+    question: str,
+    history: list[dict] | None = None,
+    tags: list[str] | None = None,
+    use_rerank: bool = True,
+    hybrid: bool = True,
+    model_id: str | None = None,
+    min_similarity: float = 0.0,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
+) -> dict:
+    """Full RAG pipeline. Returns {answer, sources, history}."""
+    ui_cfg = config.ui("ask")
+    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid,
+                      min_similarity=min_similarity, workspace=workspace,
+                      embed_model_id=embed_model_id)
+
+    if not chunks:
+        return {
+            "answer": ui_cfg.get("empty_kb_message",
+                                 "No content has been ingested yet. Add some text or URLs in the Ingest tab first."),
+            "sources": [],
+            "history": history or [],
+        }
+
+    if use_rerank:
+        chunks = rerank(question, chunks, top_n=FINAL_K)
+    else:
+        chunks = chunks[:FINAL_K]
+
+    context, sources = _build_context(chunks)
+
     messages = list(history or [])
     messages.append({
         "role": "user",
@@ -287,7 +300,6 @@ def ask(
     )
     answer = response.content[0].text
 
-    # Append assistant turn to history (with clean question, not the context blob)
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
     updated_history.append({"role": "assistant", "content": answer})
@@ -302,17 +314,20 @@ def ask_stream(
     use_rerank: bool = True,
     hybrid: bool = True,
     model_id: str | None = None,
+    min_similarity: float = 0.0,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ):
-    """Streaming version of ask(). Yields (token, sources, updated_history) tuples.
-
-    On each yield: token is the new text fragment, sources is set once on first yield,
-    and updated_history is None until the final yield.
-    """
-    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid)
+    """Streaming version of ask(). Yields (token, sources, updated_history) tuples."""
+    ui_cfg = config.ui("ask")
+    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid,
+                      min_similarity=min_similarity, workspace=workspace,
+                      embed_model_id=embed_model_id)
 
     if not chunks:
         yield (
-            "No content has been ingested yet. Add some text or URLs in the Ingest tab first.",
+            ui_cfg.get("empty_kb_message",
+                       "No content has been ingested yet. Add some text or URLs in the Ingest tab first."),
             [],
             history or [],
         )
@@ -323,18 +338,7 @@ def ask_stream(
     else:
         chunks = chunks[:FINAL_K]
 
-    # Build context
-    context_parts = []
-    sources = []
-    for i, chunk in enumerate(chunks, 1):
-        meta = chunk["metadata"]
-        title = meta.get("title", "Unknown")
-        url = meta.get("url", "")
-        score = chunk.get("rerank_score", chunk.get("semantic_score", 0))
-        context_parts.append(f"--- Chunk {i} [Source: {title}] ---\n{chunk['text']}")
-        sources.append({"title": title, "url": url, "score": score, "text": chunk["text"]})
-
-    context = "\n\n".join(context_parts)
+    context, sources = _build_context(chunks)
 
     messages = list(history or [])
     messages.append({
@@ -354,7 +358,6 @@ def ask_stream(
             full_answer += text
             yield (text, sources, None)
 
-    # Final yield with complete history
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
     updated_history.append({"role": "assistant", "content": full_answer})
@@ -368,7 +371,6 @@ def summarise_source(source_id: int) -> str:
     if not chunks:
         return "No chunks found for this source."
 
-    # Concatenate up to ~3000 tokens worth of text to keep cost low
     texts = []
     total = 0
     for c in chunks:

@@ -302,7 +302,7 @@ Question: What are the key reliability principles?"
 
 Streamlit turns Python scripts into web apps. `app.py` is a regular Python file — Streamlit re-runs it from top to bottom on every user interaction (button click, text input, etc.). Session state persists between re-runs.
 
-**Why Streamlit:** Zero frontend code. No HTML, CSS, JavaScript, React, or build tools. The entire UI is defined in ~500 lines of Python. For a personal tool, this is the right trade-off — you sacrifice customisation for development speed.
+**Why Streamlit:** Zero frontend code. No HTML, CSS, JavaScript, React, or build tools. The entire UI is defined in ~550 lines of Python. For a personal tool, this is the right trade-off — you sacrifice customisation for development speed.
 
 ### BeautifulSoup — Web Scraping
 
@@ -398,34 +398,47 @@ Most YouTube videos have auto-generated captions (YouTube's own speech-to-text).
 - **URL** — fetches and extracts web page content (with JS-rendering detection)
 - **File upload** — PDF, DOCX, TXT, Markdown, CSV, JSON, and RST files
 - **YouTube** — pulls auto-generated or community transcripts (local only)
-- **Bulk URLs** — paste a list of URLs, ingest them all at once
+- **Bulk URLs** — paste a list of URLs with progress tracking
 - **Tagging** — tag sources on ingest or edit tags later
-- **KB import** — import a previously exported SecondBrain knowledge base
+- **KB import/export** — backup and restore your entire knowledge base as JSON
+- **Embedding model picker** — choose between MiniLM-L6, MiniLM-L12, BGE-small, or E5-small at ingest time
 
 ### Retrieval
 - **Hybrid search** — combines semantic (embedding) and keyword (BM25) search via Reciprocal Rank Fusion
 - **Cross-encoder reranking** — optional second-pass ranking for higher precision
 - **Tag filtering** — scope queries to specific topics
+- **Similarity threshold** — adjustable minimum relevance score to filter out weak matches
 - **Conversation history** — multi-turn Q&A within a session
 - **Streaming responses** — answers appear token by token as Claude generates them
-- **Model picker** — choose between Claude Sonnet 4 (default) or Haiku 3.5 (fast/cheap)
+- **LLM model picker** — choose between Claude Sonnet 4 (default) or Haiku 3.5 (fast/cheap)
 
 ### Source Management
-- **View all chunks** for any source
+- **View and edit chunks** — inspect and modify individual chunk text inline
 - **Edit tags** inline
 - **Summarise** — AI-generated bullet-point summary of any source
+- **URL freshness check** — detect when a URL source's content has changed since last ingest
+- **Re-crawl** — automatically re-fetch and re-ingest changed URL sources
 - **Re-ingest** — re-embed all chunks (useful after switching embedding models)
 - **Delete** — removes source + all vectors from ChromaDB and SQLite
-- **Export KB** — download your entire knowledge base as a JSON file for backup or migration
+
+### Workspaces
+- **Multi-collection support** — separate knowledge bases for different projects (e.g. work, research, personal)
+- **Pre-defined or custom** — configure workspaces in `config.yaml` or create them on the fly
+- **Sidebar workspace switcher** — seamlessly switch between workspaces
 
 ### Analytics & History
-- **Search history** — browse, review, and re-ask past queries
-- **KB analytics** — total sources, chunks, queries, source type breakdown, tag frequency
+- **Search history** — browse, review, and re-ask past queries (persisted in SQLite)
+- **KB analytics** — total sources, chunks, queries, source type breakdown with progress bars, tag frequency
 - **Duplicate detection** — scan for near-duplicate chunks using cosine similarity on embeddings
 
 ### Output
 - **Markdown export** — download the last answer + sources as a `.md` file
 - **Source transparency** — every answer shows which chunks were used and their relevance scores
+
+### UI & Customisation
+- **Professional dark theme** — gradient header, metric cards, styled chat bubbles, custom CSS
+- **Fully configurable** — all text, labels, placeholders, colours, and models defined in `config.yaml`
+- **48 unit tests** — chunking, BM25, RRF, database, and config loader all covered
 
 ---
 
@@ -490,16 +503,19 @@ SecondBrain/
 │   ├── config.toml             # Streamlit server config (file watcher, logging)
 │   ├── secrets.toml            # Local secrets (git-ignored)
 │   └── secrets.toml.example    # Template for secrets
-├── app.py                      # Streamlit UI — Ingest, Ask, History, Sources, Analytics tabs
-├── ingest.py                   # Ingestion pipeline — all content types + chunking + export/import
+├── app.py                      # Streamlit UI — 5 tabs, custom CSS, workspace switcher
+├── config.py                   # Config loader — reads config.yaml
+├── config.yaml                 # All customisable text, colours, models, and defaults
+├── ingest.py                   # Ingestion — all content types, chunking, export/import, re-crawl
 ├── query.py                    # Retrieval — hybrid search, reranking, streaming generation
 ├── db.py                       # SQLite — sources, chunks, tags, search history, analytics
 ├── requirements.txt            # Python dependencies
+├── tests/                      # 48 unit tests (chunking, BM25, RRF, DB, config)
 ├── .env                        # Anthropic API key (git-ignored)
 ├── .env.example                # Template for .env
 ├── .gitignore
 └── data/                       # Local data (git-ignored)
-    ├── chroma/                 # ChromaDB vector storage
+    ├── chroma/                 # ChromaDB vector storage (per-workspace collections)
     └── metadata.db             # SQLite metadata
 ```
 
@@ -507,14 +523,60 @@ SecondBrain/
 
 ## Configuration
 
-| Parameter | File | Default | Description |
-|-----------|------|---------|-------------|
-| `CHUNK_SIZE` | ingest.py | 500 | Target tokens per chunk |
-| `CHUNK_OVERLAP` | ingest.py | 50 | Overlap tokens between adjacent chunks |
-| `TOP_K` | query.py | 10 | Candidates retrieved before reranking |
-| `FINAL_K` | query.py | 5 | Chunks sent to Claude after reranking |
-| `RRF_K` | query.py | 60 | RRF merge constant |
-| `model` | query.py / app.py | claude-sonnet-4-20250514 | Claude model for answer generation (selectable in UI) |
+All settings live in **`config.yaml`** — edit this single file to customise the entire app without touching Python code.
+
+### Branding & Text
+
+```yaml
+branding:
+  app_name: "SecondBrain"           # shown in header
+  emoji: "🧠"                       # header + favicon
+  tagline: "Your personal RAG..."   # subtitle
+```
+
+All UI labels, placeholders, tab names, and help text are under the `ui:` section.
+
+### Retrieval Parameters
+
+| Parameter | Section | Default | Description |
+|-----------|---------|---------|-------------|
+| `chunk_size` | `retrieval` | 500 | Target tokens per chunk |
+| `chunk_overlap` | `retrieval` | 50 | Overlap tokens between adjacent chunks |
+| `top_k` | `retrieval` | 10 | Candidates retrieved before reranking |
+| `final_k` | `retrieval` | 5 | Chunks sent to Claude after reranking |
+| `rrf_k` | `retrieval` | 60 | RRF merge constant |
+| `min_similarity` | `retrieval` | 0.0 | Default minimum similarity threshold |
+| `dedup_threshold` | `retrieval` | 0.95 | Cosine similarity threshold for duplicate detection |
+
+### Models
+
+```yaml
+models:
+  llm:
+    - name: "Claude Sonnet 4"
+      id: "claude-sonnet-4-20250514"
+      default: true
+  embedding:
+    - name: "MiniLM-L6 (default, 384d)"
+      id: "all-MiniLM-L6-v2"
+      default: true
+```
+
+### Theme
+
+The `theme:` section controls the custom CSS — colours, gradients, fonts. Edit the hex values and the UI updates instantly.
+
+### Workspaces
+
+```yaml
+workspaces:
+  enabled: true
+  default: "default"
+  predefined:
+    - name: "work"
+      description: "Work documents"
+      icon: "💼"
+```
 
 ---
 
@@ -526,7 +588,7 @@ GitHub Actions runs on every push and pull request to `main`:
 2. **Dependency caching** — pip packages are cached to speed up runs
 3. **Linting** — `ruff check .` catches style issues and common bugs
 4. **Import verification** — ensures all modules load without errors
-5. **Tests** — runs `pytest` (gracefully skips if no tests exist yet)
+5. **Tests** — runs `pytest` with 48 unit tests (chunking, BM25, RRF, database, config)
 
 ---
 

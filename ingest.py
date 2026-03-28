@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import chromadb
@@ -11,34 +12,42 @@ from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
 from youtube_transcript_api import YouTubeTranscriptApi
 
+import config
 import db
 
 CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "secondbrain"
-CHUNK_SIZE = 500       # target tokens (~words * 1.3)
-CHUNK_OVERLAP = 50
+
+_cfg = config.retrieval()
+CHUNK_SIZE = _cfg.get("chunk_size", 500)
+CHUNK_OVERLAP = _cfg.get("chunk_overlap", 50)
 MIN_CONTENT_LENGTH = 200
 
-_model: SentenceTransformer | None = None
-_collection: chromadb.Collection | None = None
+_models: dict[str, SentenceTransformer] = {}
+_collections: dict[str, chromadb.Collection] = {}
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
+def _get_model(model_id: str | None = None) -> SentenceTransformer:
+    model_id = model_id or "all-MiniLM-L6-v2"
+    if model_id not in _models:
+        _models[model_id] = SentenceTransformer(model_id)
+    return _models[model_id]
 
 
-def _get_collection() -> chromadb.Collection:
-    global _collection
-    if _collection is None:
+def _collection_name(workspace: str | None = None) -> str:
+    ws = workspace or config.workspaces().get("default", "default")
+    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+
+
+def _get_collection(workspace: str | None = None) -> chromadb.Collection:
+    name = _collection_name(workspace)
+    if name not in _collections:
         client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        _collection = client.get_or_create_collection(
-            name=COLLECTION_NAME,
+        _collections[name] = client.get_or_create_collection(
+            name=name,
             metadata={"hnsw:space": "cosine"},
         )
-    return _collection
+    return _collections[name]
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +119,6 @@ def extract_docx_text(file_bytes: bytes) -> str:
 
 def fetch_youtube_transcript(url: str) -> str:
     """Extract transcript text from a YouTube URL."""
-    # Extract video ID from various YouTube URL formats
     patterns = [
         r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})",
     ]
@@ -125,35 +133,69 @@ def fetch_youtube_transcript(url: str) -> str:
 
     transcript_list = YouTubeTranscriptApi().fetch(video_id)
     text = " ".join(entry.text for entry in transcript_list)
-    # Clean up auto-generated transcript artefacts
-    text = re.sub(r"\[.*?\]", "", text)   # remove [Music], [Applause] etc.
+    text = re.sub(r"\[.*?\]", "", text)
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
 
 
 # ---------------------------------------------------------------------------
-# Chunking — recursive splitter
+# Chunking — markdown-aware recursive splitter
 # ---------------------------------------------------------------------------
 
 def _approx_tokens(text: str) -> int:
     return int(len(text.split()) * 1.3)
 
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Recursive chunker that respects headings, then paragraphs, then sentences.
+# Patterns for detecting protected blocks that should not be split
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+_TABLE_RE = re.compile(r"(?:^\|.+\|$\n?){2,}", re.MULTILINE)
 
-    Strategy:
-    1. Split on markdown/heading boundaries first (# ## ### or blank-line-separated blocks)
-    2. If a section still exceeds chunk_size, split by paragraphs
-    3. If a paragraph still exceeds chunk_size, split by sentences
-    4. Carry overlap tokens into the next chunk at every level
+
+def _protect_blocks(text: str) -> tuple[str, dict[str, str]]:
+    """Replace code blocks and tables with placeholders so they aren't split."""
+    placeholders: dict[str, str] = {}
+    counter = 0
+
+    def _replace(match: re.Match) -> str:
+        nonlocal counter
+        key = f"\x00BLOCK_{counter}\x00"
+        placeholders[key] = match.group(0)
+        counter += 1
+        return key
+
+    text = _CODE_BLOCK_RE.sub(_replace, text)
+    text = _TABLE_RE.sub(_replace, text)
+    return text, placeholders
+
+
+def _restore_blocks(chunks: list[str], placeholders: dict[str, str]) -> list[str]:
+    """Restore protected blocks from placeholders."""
+    if not placeholders:
+        return chunks
+    restored = []
+    for chunk in chunks:
+        for key, value in placeholders.items():
+            chunk = chunk.replace(key, value)
+        restored.append(chunk)
+    return restored
+
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Markdown-aware recursive chunker.
+
+    Preserves code blocks and tables as atomic units, then splits on:
+    1. Markdown headings (# ## ###)
+    2. Blank lines (paragraphs)
+    3. Sentence boundaries
+    4. Words (last resort)
     """
-    return _recursive_split(text, chunk_size, overlap)
+    protected_text, placeholders = _protect_blocks(text)
+    chunks = _recursive_split(protected_text, chunk_size, overlap)
+    return _restore_blocks(chunks, placeholders)
 
 
 def _recursive_split(text: str, chunk_size: int, overlap: int) -> list[str]:
     """Split text using progressively finer boundaries until chunks fit."""
-    # Separators tried in order — most structural first
     separators = [
         r"\n#{1,6} ",           # markdown headings
         r"\n\n",                # blank lines (paragraphs)
@@ -171,14 +213,12 @@ def _split_with_separator(text: str, separators: list[str], chunk_size: int, ove
         return [text.strip()]
 
     if not separators:
-        # Can't split further — return as-is even if oversized
         return [text.strip()]
 
     sep = separators[0]
     parts = [p for p in re.split(sep, text) if p.strip()]
 
     if len(parts) <= 1:
-        # This separator didn't help — try the next one
         return _split_with_separator(text, separators[1:], chunk_size, overlap)
 
     chunks: list[str] = []
@@ -190,13 +230,11 @@ def _split_with_separator(text: str, separators: list[str], chunk_size: int, ove
         part_tokens = _approx_tokens(part)
 
         if part_tokens > chunk_size:
-            # Flush current buffer first
             if current:
                 chunks.append("\n\n".join(current))
                 overlap_words = " ".join(current).split()[-int(overlap / 1.3):]
                 current = []
                 current_tokens = 0
-            # Recursively split the oversized part with finer separators
             sub_chunks = _split_with_separator(part, separators[1:], chunk_size, overlap)
             chunks.extend(sub_chunks)
             if sub_chunks:
@@ -209,7 +247,6 @@ def _split_with_separator(text: str, separators: list[str], chunk_size: int, ove
             current = []
             current_tokens = 0
 
-        # Prepend overlap text to new chunk
         if not current and overlap_words:
             overlap_text = " ".join(overlap_words)
             current = [overlap_text]
@@ -234,16 +271,19 @@ def _embed_and_store(
     source_type: str,
     url: str | None,
     tags: list[str] | None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Embed chunks and write to ChromaDB + SQLite. Returns source_id."""
-    model = _get_model()
-    collection = _get_collection()
+    model = _get_model(embed_model_id)
+    collection = _get_collection(workspace)
 
     embeddings = model.encode(chunks, show_progress_bar=False).tolist()
 
     source_id = db.log_source(
         title=title, source_type=source_type, url=url,
         chunk_count=len(chunks), tags=tags,
+        workspace=workspace or config.workspaces().get("default", "default"),
     )
     chroma_ids = [f"{source_id}_{i}_{uuid.uuid4().hex[:8]}" for i in range(len(chunks))]
     tag_str = ",".join(tags) if tags else ""
@@ -263,12 +303,14 @@ def ingest_text(
     source_type: str = "text",
     url: str | None = None,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Chunk, embed and store raw text. Returns chunk count."""
     chunks = chunk_text(text)
     if not chunks:
         return 0
-    _embed_and_store(chunks, title, source_type, url, tags)
+    _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id)
     return len(chunks)
 
 
@@ -276,10 +318,13 @@ def ingest_url(
     url: str,
     title: str | None = None,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> tuple[int, bool]:
     """Fetch a URL, extract text and ingest it. Returns (chunk_count, js_warning)."""
     text, js_warning = fetch_url_text(url)
-    chunk_count = ingest_text(text, title=title or url, source_type="url", url=url, tags=tags)
+    chunk_count = ingest_text(text, title=title or url, source_type="url", url=url, tags=tags,
+                              workspace=workspace, embed_model_id=embed_model_id)
     return chunk_count, js_warning
 
 
@@ -287,20 +332,26 @@ def ingest_pdf(
     file_bytes: bytes,
     title: str,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Extract text from a PDF and ingest it. Returns chunk count."""
     text = extract_pdf_text(file_bytes)
-    return ingest_text(text, title=title, source_type="pdf", tags=tags)
+    return ingest_text(text, title=title, source_type="pdf", tags=tags,
+                       workspace=workspace, embed_model_id=embed_model_id)
 
 
 def ingest_docx(
     file_bytes: bytes,
     title: str,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Extract text from a DOCX and ingest it. Returns chunk count."""
     text = extract_docx_text(file_bytes)
-    return ingest_text(text, title=title, source_type="docx", tags=tags)
+    return ingest_text(text, title=title, source_type="docx", tags=tags,
+                       workspace=workspace, embed_model_id=embed_model_id)
 
 
 def ingest_file(
@@ -308,32 +359,41 @@ def ingest_file(
     filename: str,
     title: str,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Ingest a file based on its extension. Returns chunk count."""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext == "pdf":
-        return ingest_pdf(file_bytes, title=title, tags=tags)
+        return ingest_pdf(file_bytes, title=title, tags=tags, workspace=workspace,
+                          embed_model_id=embed_model_id)
     elif ext == "docx":
-        return ingest_docx(file_bytes, title=title, tags=tags)
+        return ingest_docx(file_bytes, title=title, tags=tags, workspace=workspace,
+                           embed_model_id=embed_model_id)
     else:
-        # Treat as plain text (.txt, .md, .csv, etc.)
         text = file_bytes.decode("utf-8", errors="replace")
-        return ingest_text(text, title=title, source_type="file", tags=tags)
+        return ingest_text(text, title=title, source_type="file", tags=tags,
+                           workspace=workspace, embed_model_id=embed_model_id)
 
 
 def ingest_youtube(
     url: str,
     title: str | None = None,
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> int:
     """Fetch a YouTube transcript and ingest it. Returns chunk count."""
     text = fetch_youtube_transcript(url)
-    return ingest_text(text, title=title or url, source_type="youtube", url=url, tags=tags)
+    return ingest_text(text, title=title or url, source_type="youtube", url=url, tags=tags,
+                       workspace=workspace, embed_model_id=embed_model_id)
 
 
 def ingest_bulk_urls(
     urls: list[str],
     tags: list[str] | None = None,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
 ) -> list[dict]:
     """Ingest a list of URLs. Returns a result list with status per URL."""
     results = []
@@ -342,28 +402,32 @@ def ingest_bulk_urls(
         if not url:
             continue
         try:
-            count, js_warning = ingest_url(url, tags=tags)
+            count, js_warning = ingest_url(url, tags=tags, workspace=workspace,
+                                           embed_model_id=embed_model_id)
             results.append({"url": url, "chunks": count, "warning": js_warning, "error": None})
         except Exception as e:
             results.append({"url": url, "chunks": 0, "warning": False, "error": str(e)})
     return results
 
 
-def delete_source(source_id: int) -> None:
+def delete_source(source_id: int, workspace: str | None = None) -> None:
     """Delete a source and all its vectors from ChromaDB and SQLite."""
-    collection = _get_collection()
+    collection = _get_collection(workspace)
     chroma_ids = db.get_chroma_ids_for_source(source_id)
     if chroma_ids:
         collection.delete(ids=chroma_ids)
     db.delete_source(source_id)
 
 
-def export_knowledge_base() -> dict:
+def export_knowledge_base(workspace: str | None = None) -> dict:
     """Export the entire knowledge base as a JSON-serialisable dict."""
-    sources = db.get_all_sources()
-    export_data = {"version": 1, "exported_at": None, "sources": []}
-    from datetime import datetime, timezone
-    export_data["exported_at"] = datetime.now(timezone.utc).isoformat()
+    sources = db.get_all_sources(workspace=workspace)
+    export_data = {
+        "version": 1,
+        "workspace": workspace or "default",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "sources": [],
+    }
 
     for src in sources:
         chunks = db.get_chunks_for_source(src["id"])
@@ -378,11 +442,12 @@ def export_knowledge_base() -> dict:
     return export_data
 
 
-def import_knowledge_base(data: dict) -> dict:
+def import_knowledge_base(data: dict, workspace: str | None = None) -> dict:
     """Import a previously exported knowledge base. Returns summary stats."""
     imported = 0
     skipped = 0
-    existing_titles = {s["title"] for s in db.get_all_sources()}
+    ws = workspace or data.get("workspace", "default")
+    existing_titles = {s["title"] for s in db.get_all_sources(workspace=ws)}
 
     for src in data.get("sources", []):
         if src["title"] in existing_titles:
@@ -400,20 +465,22 @@ def import_knowledge_base(data: dict) -> dict:
             source_type=src.get("source_type", "text"),
             url=src.get("url"),
             tags=src.get("tags"),
+            workspace=ws,
         )
         imported += 1
 
     return {"imported": imported, "skipped": skipped}
 
 
-def find_duplicate_chunks(threshold: float = 0.95) -> list[dict]:
+def find_duplicate_chunks(threshold: float | None = None, workspace: str | None = None) -> list[dict]:
     """Find near-duplicate chunks using cosine similarity. Returns pairs above threshold."""
-    collection = _get_collection()
+    if threshold is None:
+        threshold = config.retrieval().get("dedup_threshold", 0.95)
+    collection = _get_collection(workspace)
     total = collection.count()
     if total < 2:
         return []
 
-    # Get all chunks (limit to 500 for performance)
     limit = min(total, 500)
     all_data = collection.get(limit=limit, include=["documents", "metadatas", "embeddings"])
 
@@ -422,7 +489,6 @@ def find_duplicate_chunks(threshold: float = 0.95) -> list[dict]:
 
     import numpy as np
     embeddings = np.array(all_data["embeddings"])
-    # Normalize for cosine similarity
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1
     normed = embeddings / norms
@@ -448,8 +514,65 @@ def find_duplicate_chunks(threshold: float = 0.95) -> list[dict]:
     return sorted(duplicates, key=lambda x: x["similarity"], reverse=True)[:50]
 
 
-def reingest_source(source_id: int) -> int:
-    """Re-embed and re-store all chunks for an existing source (e.g. after model change).
+def check_url_freshness(source_id: int) -> dict:
+    """Check if a URL source's content has changed since last ingest.
+
+    Returns dict with keys: changed (bool), old_length, new_length, error (str|None).
+    """
+    sources = [s for s in db.get_all_sources() if s["id"] == source_id]
+    if not sources:
+        return {"changed": False, "error": "Source not found"}
+    src = sources[0]
+    if not src.get("url"):
+        return {"changed": False, "error": "Source has no URL"}
+
+    try:
+        new_text, _ = fetch_url_text(src["url"])
+    except Exception as e:
+        return {"changed": False, "error": str(e)}
+
+    old_chunks = db.get_chunks_for_source(source_id)
+    old_text = " ".join(c["text"] for c in old_chunks)
+
+    old_len = len(old_text.split())
+    new_len = len(new_text.split())
+    # Consider changed if word count differs by more than 10%
+    changed = abs(new_len - old_len) / max(old_len, 1) > 0.10
+
+    return {"changed": changed, "old_length": old_len, "new_length": new_len, "error": None}
+
+
+def recrawl_source(source_id: int, workspace: str | None = None) -> dict:
+    """Re-fetch a URL source and re-ingest if content changed.
+
+    Returns dict: {changed, chunks, error}.
+    """
+    sources = [s for s in db.get_all_sources() if s["id"] == source_id]
+    if not sources:
+        return {"changed": False, "chunks": 0, "error": "Source not found"}
+    src = sources[0]
+    if not src.get("url"):
+        return {"changed": False, "chunks": 0, "error": "Source has no URL"}
+
+    freshness = check_url_freshness(source_id)
+    if freshness.get("error"):
+        return {"changed": False, "chunks": 0, "error": freshness["error"]}
+    if not freshness["changed"]:
+        return {"changed": False, "chunks": 0, "error": None}
+
+    # Delete old and re-ingest
+    delete_source(source_id, workspace=workspace)
+    try:
+        count, _ = ingest_url(src["url"], title=src["title"], tags=src.get("tags"),
+                              workspace=workspace)
+        return {"changed": True, "chunks": count, "error": None}
+    except Exception as e:
+        return {"changed": True, "chunks": 0, "error": str(e)}
+
+
+def reingest_source(source_id: int, workspace: str | None = None,
+                    embed_model_id: str | None = None) -> int:
+    """Re-embed and re-store all chunks for an existing source.
 
     Deletes existing vectors, re-embeds stored chunk text, writes new vectors.
     Returns the chunk count.
@@ -463,14 +586,12 @@ def reingest_source(source_id: int) -> int:
         return 0
     src = sources[0]
 
-    # Remove old vectors
-    collection = _get_collection()
+    collection = _get_collection(workspace)
     old_ids = [r["chroma_id"] for r in chunks_rows]
     collection.delete(ids=old_ids)
 
-    # Re-embed
     texts = [r["text"] for r in chunks_rows]
-    model = _get_model()
+    model = _get_model(embed_model_id)
     embeddings = model.encode(texts, show_progress_bar=False).tolist()
     new_ids = [f"{source_id}_{i}_{uuid.uuid4().hex[:8]}" for i in range(len(texts))]
     tag_str = ",".join(src.get("tags") or [])

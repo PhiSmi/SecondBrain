@@ -1,0 +1,174 @@
+# ============================================================================
+# SecondBrain — Site Configuration
+# ============================================================================
+# All user-facing text, branding, and default settings in one place.
+# Edit this file to customise the app without touching any Python code.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Branding & Identity
+# ---------------------------------------------------------------------------
+branding:
+  app_name: "SecondBrain"
+  emoji: "🧠"
+  tagline: "Your personal RAG-powered knowledge base"
+  page_title: "SecondBrain"          # browser tab title
+  favicon: "🧠"                      # browser tab icon (emoji or path to .ico)
+
+# ---------------------------------------------------------------------------
+# UI Text — Headings & Labels
+# ---------------------------------------------------------------------------
+ui:
+  # Tab names (order matters)
+  tabs:
+    - "Ingest"
+    - "Ask"
+    - "History"
+    - "Sources"
+    - "Analytics"
+
+  # Ingest tab
+  ingest:
+    heading: "Add Knowledge"
+    input_types:
+      - "Paste text"
+      - "URL"
+      - "File upload"
+      - "YouTube"
+      - "Bulk URLs"
+    paste_title_placeholder: "e.g. AWS Well-Architected — Reliability Pillar"
+    paste_area_placeholder: "Paste content here"
+    url_placeholder: "https://example.com/article"
+    youtube_placeholder: "https://www.youtube.com/watch?v=..."
+    youtube_caption: "Uses the video's auto-generated or community transcript. No audio processing needed."
+    bulk_placeholder: "https://example.com/a\nhttps://example.com/b"
+    file_help: "Supported: PDF, DOCX, TXT, Markdown, CSV, JSON, RST"
+    tag_label: "Tags (comma-separated, optional)"
+    tag_placeholder: "e.g. aws, architecture, reliability"
+    import_heading: "Import Knowledge Base"
+
+  # Ask tab
+  ask:
+    heading: "Ask Your Knowledge Base"
+    question_placeholder: "What are the key reliability design principles?"
+    search_options_label: "Search options"
+    hybrid_label: "Hybrid search (BM25 + semantic)"
+    hybrid_help: "Combines keyword and semantic search for better recall"
+    rerank_label: "Reranking"
+    rerank_help: "Cross-encoder reranks retrieved chunks for higher precision. Uses extra ~85MB RAM."
+    stream_label: "Stream response"
+    stream_help: "Show the answer as it's generated, token by token"
+    model_label: "Claude model"
+    threshold_label: "Min similarity score"
+    threshold_help: "Only include chunks above this relevance score (0.0–1.0)"
+    empty_kb_message: "No content has been ingested yet. Add some text or URLs in the Ingest tab first."
+
+  # History tab
+  history:
+    heading: "Search History"
+    empty_message: "No searches yet. Ask a question in the Ask tab to get started."
+
+  # Sources tab
+  sources:
+    heading: "Ingested Sources"
+    empty_message: "No sources ingested yet."
+
+  # Analytics tab
+  analytics:
+    heading: "Knowledge Base Analytics"
+    dedup_heading: "Duplicate Detection"
+    dedup_caption: "Find near-duplicate chunks that may be wasting space or skewing results."
+    dedup_success: "No near-duplicate chunks found."
+
+# ---------------------------------------------------------------------------
+# Theme & Styling
+# ---------------------------------------------------------------------------
+theme:
+  # Colour palette — used in custom CSS
+  primary_color: "#6C5CE7"           # purple accent
+  secondary_color: "#00CEC9"         # teal accent
+  background_dark: "#0F0F1A"         # dark navy background
+  surface_color: "#1A1A2E"           # card / panel background
+  surface_hover: "#232340"           # card hover state
+  text_primary: "#E8E8F0"           # main text
+  text_secondary: "#9090B0"         # muted text / captions
+  border_color: "#2D2D4A"           # subtle borders
+  success_color: "#00E676"          # green for success states
+  warning_color: "#FFA726"          # orange for warnings
+  error_color: "#FF5252"            # red for errors
+  gradient_start: "#6C5CE7"         # header gradient from
+  gradient_end: "#00CEC9"           # header gradient to
+
+  # Font
+  font_family: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif"
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+models:
+  # Claude LLM options shown in the model picker
+  llm:
+    - name: "Claude Sonnet 4"
+      id: "claude-sonnet-4-20250514"
+      description: "Best balance of quality and speed"
+      default: true
+    - name: "Claude Haiku 3.5"
+      id: "claude-3-5-haiku-20241022"
+      description: "Fast and cheap"
+
+  # Embedding model options
+  embedding:
+    - name: "MiniLM-L6 (default, 384d)"
+      id: "all-MiniLM-L6-v2"
+      dimensions: 384
+      default: true
+    - name: "MiniLM-L12 (better quality, 384d)"
+      id: "all-MiniLM-L12-v2"
+      dimensions: 384
+    - name: "BGE-small (512d)"
+      id: "BAAI/bge-small-en-v1.5"
+      dimensions: 384
+    - name: "E5-small (384d)"
+      id: "intfloat/e5-small-v2"
+      dimensions: 384
+
+# ---------------------------------------------------------------------------
+# Retrieval Defaults
+# ---------------------------------------------------------------------------
+retrieval:
+  chunk_size: 500                    # target tokens per chunk (~words × 1.3)
+  chunk_overlap: 50                  # overlap tokens between adjacent chunks
+  top_k: 10                         # candidates retrieved before reranking
+  final_k: 5                        # chunks sent to Claude after reranking
+  rrf_k: 60                         # RRF merge constant
+  default_hybrid: true               # hybrid search on by default
+  default_rerank: false              # reranking off by default (saves RAM)
+  default_stream: true               # streaming on by default
+  min_similarity: 0.0                # default minimum similarity threshold
+  dedup_threshold: 0.95              # cosine similarity threshold for duplicate detection
+
+# ---------------------------------------------------------------------------
+# Workspaces (Multi-collection support)
+# ---------------------------------------------------------------------------
+workspaces:
+  enabled: true
+  default: "default"
+  # Pre-defined workspaces — users can also create new ones from the UI
+  predefined:
+    - name: "default"
+      description: "General knowledge base"
+      icon: "📚"
+    - name: "work"
+      description: "Work-related documents"
+      icon: "💼"
+    - name: "research"
+      description: "Academic papers and research"
+      icon: "🔬"
+
+# ---------------------------------------------------------------------------
+# Re-crawl Settings
+# ---------------------------------------------------------------------------
+recrawl:
+  enabled: true
+  check_interval_hours: 168          # default: check weekly (168h = 7 days)
+  auto_reingest: false               # if true, automatically re-ingest changed URLs
