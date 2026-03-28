@@ -7,6 +7,7 @@ import streamlit as st
 
 import config
 import db
+import evaluate
 import ingest
 import query
 
@@ -21,19 +22,32 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS — professional dark theme
+# Light / Dark mode toggle
 # ---------------------------------------------------------------------------
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = True
+
 _theme = config.theme()
+_dark = st.session_state["dark_mode"]
+
+# Colours adapt to mode
+_bg = _theme["background_dark"] if _dark else "#F8F9FA"
+_surface = _theme["surface_color"] if _dark else "#FFFFFF"
+_surface_hover = _theme["surface_hover"] if _dark else "#F0F0F5"
+_text = _theme["text_primary"] if _dark else "#1A1A2E"
+_text_muted = _theme["text_secondary"] if _dark else "#6C6C8A"
+_border = _theme["border_color"] if _dark else "#E0E0E8"
+
 _css = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-/* ---- Global ---- */
 .stApp {{
     font-family: {_theme.get("font_family", "Inter, sans-serif")};
+    background-color: {_bg};
+    color: {_text};
 }}
 
-/* ---- Header gradient ---- */
 .app-header {{
     background: linear-gradient(135deg, {_theme["gradient_start"]} 0%, {_theme["gradient_end"]} 100%);
     padding: 2rem 2.5rem;
@@ -42,23 +56,15 @@ _css = f"""
     box-shadow: 0 8px 32px rgba(108, 92, 231, 0.15);
 }}
 .app-header h1 {{
-    color: white;
-    font-size: 2.2rem;
-    font-weight: 700;
-    margin: 0 0 0.3rem 0;
-    letter-spacing: -0.5px;
+    color: white; font-size: 2.2rem; font-weight: 700; margin: 0 0 0.3rem 0; letter-spacing: -0.5px;
 }}
 .app-header p {{
-    color: rgba(255, 255, 255, 0.85);
-    font-size: 1.05rem;
-    margin: 0;
-    font-weight: 300;
+    color: rgba(255,255,255,0.85); font-size: 1.05rem; margin: 0; font-weight: 300;
 }}
 
-/* ---- Metric cards ---- */
 .metric-card {{
-    background: linear-gradient(145deg, {_theme["surface_color"]}, {_theme["surface_hover"]});
-    border: 1px solid {_theme["border_color"]};
+    background: {_surface};
+    border: 1px solid {_border};
     border-radius: 12px;
     padding: 1.2rem 1.5rem;
     text-align: center;
@@ -69,87 +75,47 @@ _css = f"""
     box-shadow: 0 6px 20px rgba(108, 92, 231, 0.12);
 }}
 .metric-card .metric-value {{
-    font-size: 2.2rem;
-    font-weight: 700;
+    font-size: 2.2rem; font-weight: 700;
     background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    line-height: 1.2;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1.2;
 }}
 .metric-card .metric-label {{
-    font-size: 0.85rem;
-    color: {_theme["text_secondary"]};
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-top: 0.3rem;
+    font-size: 0.85rem; color: {_text_muted}; text-transform: uppercase; letter-spacing: 1px; margin-top: 0.3rem;
 }}
 
-/* ---- Workspace badge ---- */
 .workspace-badge {{
     display: inline-block;
-    background: linear-gradient(135deg, {_theme["primary_color"]}22, {_theme["secondary_color"]}22);
+    background: {_theme["primary_color"]}22;
     border: 1px solid {_theme["primary_color"]}44;
-    border-radius: 20px;
-    padding: 0.25rem 0.8rem;
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: {_theme["primary_color"]};
-    margin-bottom: 0.5rem;
+    border-radius: 20px; padding: 0.25rem 0.8rem; font-size: 0.82rem; font-weight: 500;
+    color: {_theme["primary_color"]}; margin-bottom: 0.5rem;
 }}
 
-/* ---- Chat messages ---- */
 .chat-user {{
     background: {_theme["primary_color"]}15;
     border-left: 3px solid {_theme["primary_color"]};
-    padding: 0.8rem 1.2rem;
-    border-radius: 0 10px 10px 0;
-    margin-bottom: 0.5rem;
+    padding: 0.8rem 1.2rem; border-radius: 0 10px 10px 0; margin-bottom: 0.5rem;
 }}
-.chat-assistant {{
-    padding: 0.8rem 1.2rem;
-    margin-bottom: 1rem;
-    line-height: 1.7;
-}}
+.chat-assistant {{ padding: 0.8rem 1.2rem; margin-bottom: 1rem; line-height: 1.7; }}
 
-/* ---- Source cards ---- */
-.source-card {{
-    border: 1px solid {_theme["border_color"]};
-    border-radius: 10px;
-    padding: 0.6rem 1rem;
-    margin-bottom: 0.5rem;
-    transition: border-color 0.2s;
-}}
-.source-card:hover {{
-    border-color: {_theme["primary_color"]}66;
-}}
-
-/* ---- Section divider ---- */
 .section-divider {{
     height: 1px;
-    background: linear-gradient(90deg, transparent, {_theme["border_color"]}, transparent);
-    margin: 1.5rem 0;
-    border: none;
+    background: linear-gradient(90deg, transparent, {_border}, transparent);
+    margin: 1.5rem 0; border: none;
 }}
 
-/* ---- Tabs styling ---- */
-.stTabs [data-baseweb="tab-list"] {{
-    gap: 0.5rem;
-}}
-.stTabs [data-baseweb="tab"] {{
-    border-radius: 8px;
-    padding: 0.5rem 1.2rem;
-    font-weight: 500;
-}}
+.stTabs [data-baseweb="tab-list"] {{ gap: 0.5rem; }}
+.stTabs [data-baseweb="tab"] {{ border-radius: 8px; padding: 0.5rem 1.2rem; font-weight: 500; }}
 
-/* ---- Button accents ---- */
 .stButton > button[kind="primary"] {{
     background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    border: none;
-    font-weight: 600;
-    letter-spacing: 0.3px;
+    border: none; font-weight: 600; letter-spacing: 0.3px;
 }}
 
-/* ---- Streamlit overrides — hide default decorations ---- */
+.eval-score-1, .eval-score-2 {{ color: {_theme["error_color"]}; font-weight: 700; }}
+.eval-score-3 {{ color: {_theme["warning_color"]}; font-weight: 700; }}
+.eval-score-4, .eval-score-5 {{ color: {_theme["success_color"]}; font-weight: 700; }}
+
 #MainMenu {{visibility: hidden;}}
 header {{visibility: hidden;}}
 footer {{visibility: hidden;}}
@@ -199,16 +165,20 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Workspace selector (sidebar)
+# Sidebar — workspace + theme toggle
 # ---------------------------------------------------------------------------
 ws_cfg = config.workspaces()
-if ws_cfg.get("enabled"):
-    with st.sidebar:
+with st.sidebar:
+    # Theme toggle
+    dark = st.toggle("Dark mode", value=st.session_state["dark_mode"], key="theme_toggle")
+    if dark != st.session_state["dark_mode"]:
+        st.session_state["dark_mode"] = dark
+        st.rerun()
+
+    if ws_cfg.get("enabled"):
         st.markdown("### Workspace")
         predefined = ws_cfg.get("predefined", [])
         ws_names = [w["name"] for w in predefined]
-
-        # Add any workspaces that exist in DB but not in config
         for ws in db.get_workspaces():
             if ws not in ws_names:
                 ws_names.append(ws)
@@ -221,14 +191,11 @@ if ws_cfg.get("enabled"):
             ws_display.append(f"{icon} {name}" + (f" — {desc}" if desc else ""))
 
         selected_ws_idx = st.selectbox(
-            "Active workspace",
-            range(len(ws_names)),
-            format_func=lambda i: ws_display[i],
-            label_visibility="collapsed",
+            "Active workspace", range(len(ws_names)),
+            format_func=lambda i: ws_display[i], label_visibility="collapsed",
         )
         active_workspace = ws_names[selected_ws_idx]
 
-        # Create new workspace
         with st.expander("New workspace"):
             new_ws_name = st.text_input("Name", placeholder="e.g. projects", key="new_ws")
             if st.button("Create") and new_ws_name.strip():
@@ -236,16 +203,25 @@ if ws_cfg.get("enabled"):
                 st.rerun()
 
         st.markdown(f'<div class="workspace-badge">Active: {active_workspace}</div>', unsafe_allow_html=True)
-else:
-    active_workspace = "default"
+    else:
+        active_workspace = "default"
+
+    # Cost summary in sidebar
+    usage = db.get_api_usage_stats()
+    if usage["total_calls"] > 0:
+        st.markdown("---")
+        st.markdown("### API Usage")
+        st.caption(f"Calls: {usage['total_calls']}")
+        st.caption(f"Cost: ${usage['total_cost_usd']:.4f}")
+
 
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 _ui = config.ui()
-tab_names = _ui.get("tabs", ["Ingest", "Ask", "History", "Sources", "Analytics"])
-tab_ingest, tab_ask, tab_history, tab_sources, tab_analytics = st.tabs(tab_names)
-
+tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval = st.tabs(
+    ["Ingest", "Ask", "History", "Sources", "RSS Feeds", "Analytics", "Eval"]
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -265,11 +241,7 @@ def _build_export_md(question: str, result: dict) -> str:
     lines = [
         f"# {question}",
         f"*Exported from {_brand.get('app_name', 'SecondBrain')} — {datetime.date.today()}*",
-        "",
-        "## Answer",
-        result["answer"],
-        "",
-        "## Sources",
+        "", "## Answer", result["answer"], "", "## Sources",
     ]
     for i, src in enumerate(result.get("sources", []), 1):
         lines.append(f"### {i}. {src['title']}")
@@ -296,24 +268,43 @@ with tab_ingest:
     embed_models = config.models("embedding")
     embed_names = [m["name"] for m in embed_models]
     default_idx = next((i for i, m in enumerate(embed_models) if m.get("default")), 0)
-    embed_choice = st.selectbox("Embedding model", embed_names, index=default_idx,
-                                help="Choose which model converts text into vectors")
-    embed_model_id = embed_models[embed_names.index(embed_choice)]["id"]
+
+    col_embed, col_autotag, col_ocr = st.columns([2, 1, 1])
+    with col_embed:
+        embed_choice = st.selectbox("Embedding model", embed_names, index=default_idx)
+        embed_model_id = embed_models[embed_names.index(embed_choice)]["id"]
+    with col_autotag:
+        use_autotag = st.toggle("Auto-tag with AI", value=False,
+                                help="Use Claude Haiku to suggest tags automatically")
+    with col_ocr:
+        use_ocr = st.toggle("OCR for scanned PDFs", value=False,
+                             help="Use Tesseract OCR for image-based PDFs. Requires tesseract installed.")
 
     if input_type == "Paste text":
         title = st.text_input("Title", placeholder=_ingest_cfg.get("paste_title_placeholder", ""))
         text = st.text_area(_ingest_cfg.get("paste_area_placeholder", "Paste content here"), height=300)
         tags = _tag_input("tags_text")
+
+        if use_autotag and text.strip():
+            if st.button("Suggest tags"):
+                with st.spinner("Asking Claude for tag suggestions..."):
+                    suggested = query.suggest_tags(text)
+                st.info(f"Suggested: **{', '.join(suggested)}**")
+
         if st.button("Ingest", type="primary"):
             if not text.strip():
                 st.error("Please paste some text.")
             elif not title.strip():
                 st.error("Please provide a title.")
             else:
+                if use_autotag and not tags:
+                    with st.spinner("Auto-tagging..."):
+                        tags = query.suggest_tags(text)
                 with st.spinner("Chunking and embedding..."):
                     n = ingest.ingest_text(text, title=title.strip(), tags=tags,
                                            workspace=active_workspace, embed_model_id=embed_model_id)
-                st.success(f"Ingested **{n}** chunks from \"{title.strip()}\"")
+                st.success(f"Ingested **{n}** chunks from \"{title.strip()}\"" +
+                           (f" with tags: {', '.join(tags)}" if tags else ""))
 
     elif input_type == "URL":
         url = st.text_input("URL", placeholder=_ingest_cfg.get("url_placeholder", ""))
@@ -327,22 +318,20 @@ with tab_ingest:
                     try:
                         n, js_warn = ingest.ingest_url(url.strip(), title=title.strip() or None, tags=tags,
                                                        workspace=active_workspace, embed_model_id=embed_model_id)
+                        if use_autotag and not tags:
+                            text_content, _ = ingest.fetch_url_text(url.strip())
+                            tags = query.suggest_tags(text_content)
                         if js_warn:
-                            st.warning(
-                                f"Only extracted a small amount of text ({n} chunk(s)). "
-                                "This page likely requires JavaScript — try **Paste text** instead."
-                            )
+                            st.warning(f"Only {n} chunk(s) — page likely requires JavaScript.")
                         else:
                             st.success(f"Ingested **{n}** chunks.")
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
     elif input_type == "File upload":
-        uploaded = st.file_uploader(
-            "Upload a file",
-            type=["pdf", "docx", "txt", "md", "csv", "json", "rst"],
-            help=_ingest_cfg.get("file_help", ""),
-        )
+        uploaded = st.file_uploader("Upload a file",
+                                    type=["pdf", "docx", "txt", "md", "csv", "json", "rst"],
+                                    help=_ingest_cfg.get("file_help", ""))
         title = st.text_input("Title", placeholder="e.g. AWS Security Whitepaper")
         tags = _tag_input("tags_file")
         if st.button("Ingest file", type="primary"):
@@ -351,9 +340,15 @@ with tab_ingest:
             elif not title.strip():
                 st.error("Please provide a title.")
             else:
+                file_bytes = uploaded.read()
+                if use_autotag and not tags:
+                    with st.spinner("Auto-tagging..."):
+                        preview = file_bytes[:3000].decode("utf-8", errors="replace")
+                        tags = query.suggest_tags(preview)
                 with st.spinner("Extracting and embedding..."):
-                    n = ingest.ingest_file(uploaded.read(), uploaded.name, title=title.strip(), tags=tags,
-                                           workspace=active_workspace, embed_model_id=embed_model_id)
+                    n = ingest.ingest_file(file_bytes, uploaded.name, title=title.strip(), tags=tags,
+                                           workspace=active_workspace, embed_model_id=embed_model_id,
+                                           ocr=use_ocr)
                 st.success(f"Ingested **{n}** chunks from \"{title.strip()}\"")
 
     elif input_type == "YouTube":
@@ -384,21 +379,20 @@ with tab_ingest:
             else:
                 progress = st.progress(0)
                 results = []
-                for idx, url in enumerate(urls):
+                for idx, u in enumerate(urls):
                     try:
-                        count, js_warning = ingest.ingest_url(url.strip(), tags=tags,
-                                                              workspace=active_workspace,
-                                                              embed_model_id=embed_model_id)
-                        results.append({"url": url, "chunks": count, "warning": js_warning, "error": None})
+                        count, js_warning = ingest.ingest_url(u.strip(), tags=tags,
+                                                              workspace=active_workspace, embed_model_id=embed_model_id)
+                        results.append({"url": u, "chunks": count, "warning": js_warning, "error": None})
                     except Exception as e:
-                        results.append({"url": url, "chunks": 0, "warning": False, "error": str(e)})
+                        results.append({"url": u, "chunks": 0, "warning": False, "error": str(e)})
                     progress.progress((idx + 1) / len(urls))
                 progress.empty()
                 for r in results:
                     if r["error"]:
                         st.error(f"{r['url']} — {r['error']}")
                     elif r["warning"]:
-                        st.warning(f"{r['url']} — {r['chunks']} chunks (JS-rendered, may be partial)")
+                        st.warning(f"{r['url']} — {r['chunks']} chunks (JS-rendered)")
                     else:
                         st.success(f"{r['url']} — {r['chunks']} chunks")
 
@@ -424,150 +418,103 @@ with tab_ask:
     with st.expander(_ask_cfg.get("search_options_label", "Search options"), expanded=False):
         col1, col2, col3 = st.columns(3)
         with col1:
-            use_hybrid = st.toggle(
-                _ask_cfg.get("hybrid_label", "Hybrid search"),
-                value=config.retrieval().get("default_hybrid", True),
-                help=_ask_cfg.get("hybrid_help", ""),
-            )
-            use_rerank = st.toggle(
-                _ask_cfg.get("rerank_label", "Reranking"),
-                value=config.retrieval().get("default_rerank", False),
-                help=_ask_cfg.get("rerank_help", ""),
-            )
+            use_hybrid = st.toggle(_ask_cfg.get("hybrid_label", "Hybrid search"),
+                                   value=config.retrieval().get("default_hybrid", True),
+                                   help=_ask_cfg.get("hybrid_help", ""))
+            use_rerank = st.toggle(_ask_cfg.get("rerank_label", "Reranking"),
+                                   value=config.retrieval().get("default_rerank", False),
+                                   help=_ask_cfg.get("rerank_help", ""))
         with col2:
             all_tags = db.get_all_tags(workspace=active_workspace)
-            selected_tags = st.multiselect("Filter by tags", options=all_tags,
-                                           help="Leave empty to search all sources")
-            min_sim = st.slider(
-                _ask_cfg.get("threshold_label", "Min similarity score"),
-                min_value=0.0, max_value=1.0,
-                value=config.retrieval().get("min_similarity", 0.0),
-                step=0.05,
-                help=_ask_cfg.get("threshold_help", ""),
-            )
+            selected_tags = st.multiselect("Filter by tags", options=all_tags)
+            min_sim = st.slider(_ask_cfg.get("threshold_label", "Min similarity"),
+                                0.0, 1.0, config.retrieval().get("min_similarity", 0.0), 0.05)
         with col3:
             llm_models = config.models("llm")
             llm_names = [m["name"] for m in llm_models]
             default_llm = next((i for i, m in enumerate(llm_models) if m.get("default")), 0)
-            model_choice = st.selectbox(
-                _ask_cfg.get("model_label", "Claude model"),
-                llm_names,
-                index=default_llm,
-            )
+            model_choice = st.selectbox(_ask_cfg.get("model_label", "Claude model"), llm_names, index=default_llm)
             model_id = llm_models[llm_names.index(model_choice)]["id"]
+            use_streaming = st.toggle(_ask_cfg.get("stream_label", "Stream response"),
+                                      value=config.retrieval().get("default_stream", True))
 
-            use_streaming = st.toggle(
-                _ask_cfg.get("stream_label", "Stream response"),
-                value=config.retrieval().get("default_stream", True),
-                help=_ask_cfg.get("stream_help", ""),
-            )
-
-    question = st.text_input(
-        "Your question",
-        placeholder=_ask_cfg.get("question_placeholder", ""),
-        label_visibility="collapsed",
-    )
+    question = st.text_input("Your question", placeholder=_ask_cfg.get("question_placeholder", ""),
+                             label_visibility="collapsed")
 
     col_ask, col_clear = st.columns([1, 5])
     with col_ask:
         ask_clicked = st.button("Ask", type="primary", use_container_width=True)
     with col_clear:
         if st.button("Clear conversation"):
-            st.session_state.pop("chat_history", None)
-            st.session_state.pop("last_result", None)
-            st.session_state.pop("last_question", None)
+            for k in ["chat_history", "last_result", "last_question"]:
+                st.session_state.pop(k, None)
             st.rerun()
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
-    if ask_clicked:
-        if not question.strip():
-            st.error("Please enter a question.")
-        elif use_streaming:
+    if ask_clicked and question.strip():
+        if use_streaming:
             sources = []
             answer_placeholder = st.empty()
             full_answer = ""
             final_history = None
-
-            with st.spinner("Retrieving relevant chunks..."):
-                stream = query.ask_stream(
-                    question.strip(),
-                    history=st.session_state["chat_history"],
-                    tags=selected_tags or None,
-                    use_rerank=use_rerank,
-                    hybrid=use_hybrid,
-                    model_id=model_id,
-                    min_similarity=min_sim,
-                    workspace=active_workspace,
-                )
+            with st.spinner("Retrieving..."):
+                stream = query.ask_stream(question.strip(), history=st.session_state["chat_history"],
+                                          tags=selected_tags or None, use_rerank=use_rerank, hybrid=use_hybrid,
+                                          model_id=model_id, min_similarity=min_sim, workspace=active_workspace)
                 first = True
-                for token, srcs, updated_history in stream:
+                for token, srcs, updated in stream:
                     if first:
                         sources = srcs
                         first = False
                     full_answer += token
                     answer_placeholder.markdown(full_answer + "▌")
-                    if updated_history is not None:
-                        final_history = updated_history
-
+                    if updated is not None:
+                        final_history = updated
             answer_placeholder.markdown(full_answer)
-
             if final_history:
                 st.session_state["chat_history"] = final_history
             st.session_state["last_result"] = {"answer": full_answer, "sources": sources}
             st.session_state["last_question"] = question.strip()
             db.log_search(question.strip(), full_answer, sources, selected_tags or [])
         else:
-            with st.spinner("Searching and generating answer..."):
-                result = query.ask(
-                    question.strip(),
-                    history=st.session_state["chat_history"],
-                    tags=selected_tags or None,
-                    use_rerank=use_rerank,
-                    hybrid=use_hybrid,
-                    model_id=model_id,
-                    min_similarity=min_sim,
-                    workspace=active_workspace,
-                )
+            with st.spinner("Searching..."):
+                result = query.ask(question.strip(), history=st.session_state["chat_history"],
+                                   tags=selected_tags or None, use_rerank=use_rerank, hybrid=use_hybrid,
+                                   model_id=model_id, min_similarity=min_sim, workspace=active_workspace)
             st.session_state["chat_history"] = result["history"]
             st.session_state["last_result"] = result
             st.session_state["last_question"] = question.strip()
             db.log_search(question.strip(), result["answer"], result.get("sources", []), selected_tags or [])
+    elif ask_clicked:
+        st.error("Please enter a question.")
 
     # Display conversation
     if st.session_state["chat_history"]:
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
         turns = st.session_state["chat_history"]
         for i in range(0, len(turns) - 1, 2):
-            user_msg = turns[i]["content"]
-            asst_msg = turns[i + 1]["content"] if i + 1 < len(turns) else ""
-            st.markdown(f'<div class="chat-user"><strong>You</strong><br>{user_msg}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="chat-assistant">{asst_msg}</div>', unsafe_allow_html=True)
+            u = turns[i]["content"]
+            a = turns[i + 1]["content"] if i + 1 < len(turns) else ""
+            st.markdown(f'<div class="chat-user"><strong>You</strong><br>{u}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-assistant">{a}</div>', unsafe_allow_html=True)
 
-        # Sources for last answer
         last = st.session_state.get("last_result")
         if last and last.get("sources"):
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-            st.markdown("**Sources used for last answer**")
+            st.markdown("**Sources used**")
             for i, src in enumerate(last["sources"], 1):
-                score = src.get("score", 0)
-                with st.expander(f"Source {i}: {src['title']} (score: {score})"):
+                with st.expander(f"Source {i}: {src['title']} (score: {src.get('score', 0)})"):
                     if src["url"]:
                         st.markdown(f"**URL:** {src['url']}")
                     st.text(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
 
-        # Export
         last_result = st.session_state.get("last_result")
-        last_q = st.session_state.get("last_question", "")
         if last_result:
-            md = _build_export_md(last_q, last_result)
-            st.download_button(
-                label="Export last answer as Markdown",
-                data=md,
-                file_name=f"secondbrain_{datetime.date.today()}.md",
-                mime="text/markdown",
-            )
+            md = _build_export_md(st.session_state.get("last_question", ""), last_result)
+            st.download_button("Export as Markdown", data=md,
+                               file_name=f"secondbrain_{datetime.date.today()}.md", mime="text/markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -575,34 +522,23 @@ with tab_ask:
 # ---------------------------------------------------------------------------
 
 with tab_history:
-    _hist_cfg = config.ui("history")
-    st.markdown(f"### {_hist_cfg.get('heading', 'Search History')}")
-
+    st.markdown(f"### {config.ui('history').get('heading', 'Search History')}")
     history_items = db.get_search_history(limit=50)
-
     if not history_items:
-        st.info(_hist_cfg.get("empty_message", "No searches yet."))
+        st.info(config.ui("history").get("empty_message", "No searches yet."))
     else:
         col_count, col_clear = st.columns([3, 1])
         with col_count:
-            st.caption(f"Showing {len(history_items)} most recent searches")
+            st.caption(f"{len(history_items)} most recent searches")
         with col_clear:
             if st.button("Clear all history", type="secondary"):
                 db.delete_search_history()
                 st.rerun()
-
         for item in history_items:
-            searched_at = item["searched_at"][:16].replace("T", " ")
-            tags_str = ", ".join(item.get("tags_used", [])) if item.get("tags_used") else "all"
-            with st.expander(f"{searched_at} — {item['question'][:80]}"):
-                st.markdown(f"**Tags:** {tags_str}")
-                st.markdown("**Answer:**")
+            at = item["searched_at"][:16].replace("T", " ")
+            with st.expander(f"{at} — {item['question'][:80]}"):
                 st.markdown(item["answer"])
-                if item.get("sources"):
-                    st.markdown("**Sources:**")
-                    for src in item["sources"][:3]:
-                        st.caption(f"- {src.get('title', 'Unknown')} (score: {src.get('score', 'n/a')})")
-                if st.button("Re-ask this question", key=f"reask_{item['id']}"):
+                if st.button("Re-ask", key=f"reask_{item['id']}"):
                     st.session_state["reask_question"] = item["question"]
                     st.rerun()
 
@@ -612,31 +548,24 @@ with tab_history:
 # ---------------------------------------------------------------------------
 
 with tab_sources:
-    _src_cfg = config.ui("sources")
-    st.markdown(f"### {_src_cfg.get('heading', 'Ingested Sources')}")
+    st.markdown(f"### {config.ui('sources').get('heading', 'Ingested Sources')}")
 
     col_filter, col_export = st.columns([3, 1])
     with col_filter:
-        all_tags_filter = db.get_all_tags(workspace=active_workspace)
-        filter_tags = st.multiselect("Filter by tag", options=all_tags_filter, key="src_filter_tags")
+        filter_tags = st.multiselect("Filter by tag", options=db.get_all_tags(workspace=active_workspace), key="src_ft")
     with col_export:
-        if st.button("Export entire KB"):
+        if st.button("Export KB"):
             with st.spinner("Exporting..."):
                 export_data = ingest.export_knowledge_base(workspace=active_workspace)
-            st.download_button(
-                label="Download export",
-                data=json.dumps(export_data, indent=2),
-                file_name=f"secondbrain_export_{datetime.date.today()}.json",
-                mime="application/json",
-            )
+            st.download_button("Download", data=json.dumps(export_data, indent=2),
+                               file_name=f"secondbrain_export_{datetime.date.today()}.json", mime="application/json")
 
     sources = db.get_all_sources(workspace=active_workspace)
-
     if filter_tags:
         sources = [s for s in sources if any(t in s["tags"] for t in filter_tags)]
 
     if not sources:
-        st.info(_src_cfg.get("empty_message", "No sources ingested yet."))
+        st.info(config.ui("sources").get("empty_message", "No sources ingested yet."))
     else:
         for src in sources:
             with st.expander(f"{src['title']}  —  {src['chunk_count']} chunks  |  {src['source_type']}  |  {src['ingested_at'][:10]}"):
@@ -645,66 +574,101 @@ with tab_sources:
                     if src.get("url"):
                         st.caption(src["url"])
                     current_tags = ", ".join(src.get("tags") or [])
-                    new_tags_raw = st.text_input("Tags", value=current_tags, key=f"tags_{src['id']}")
-                    if st.button("Save tags", key=f"save_tags_{src['id']}"):
-                        new_tags = [t.strip() for t in new_tags_raw.split(",") if t.strip()]
-                        db.update_source_tags(src["id"], new_tags)
-                        st.success("Tags updated.")
+                    new_tags = st.text_input("Tags", value=current_tags, key=f"tags_{src['id']}")
+                    if st.button("Save tags", key=f"st_{src['id']}"):
+                        db.update_source_tags(src["id"], [t.strip() for t in new_tags.split(",") if t.strip()])
                         st.rerun()
-
                 with col2:
                     st.metric("Chunks", src["chunk_count"])
-
                     if st.button("Summarise", key=f"sum_{src['id']}"):
                         with st.spinner("Summarising..."):
-                            summary = query.summarise_source(src["id"])
-                        st.markdown(summary)
-
-                    if src.get("url"):
-                        if st.button("Check freshness", key=f"fresh_{src['id']}"):
-                            with st.spinner("Checking..."):
-                                result = ingest.check_url_freshness(src["id"])
-                            if result.get("error"):
-                                st.error(result["error"])
-                            elif result["changed"]:
-                                st.warning(f"Content changed ({result['old_length']} -> {result['new_length']} words)")
-                                if st.button("Re-crawl now", key=f"recrawl_{src['id']}"):
-                                    with st.spinner("Re-crawling..."):
-                                        r = ingest.recrawl_source(src["id"], workspace=active_workspace)
-                                    if r["error"]:
-                                        st.error(r["error"])
-                                    else:
-                                        st.success(f"Re-crawled: {r['chunks']} chunks")
-                                    st.rerun()
-                            else:
-                                st.success("Content unchanged since last ingest.")
-
-                    if st.button("Re-ingest", key=f"reingest_{src['id']}",
-                                 help="Re-embed all chunks (e.g. after switching embedding model)"):
+                            st.markdown(query.summarise_source(src["id"]))
+                    if src.get("url") and st.button("Check freshness", key=f"fr_{src['id']}"):
+                        with st.spinner("Checking..."):
+                            r = ingest.check_url_freshness(src["id"])
+                        if r.get("error"):
+                            st.error(r["error"])
+                        elif r["changed"]:
+                            st.warning(f"Changed ({r['old_length']} -> {r['new_length']} words)")
+                        else:
+                            st.success("Unchanged")
+                    if st.button("Re-ingest", key=f"ri_{src['id']}"):
                         with st.spinner("Re-embedding..."):
                             n = ingest.reingest_source(src["id"], workspace=active_workspace)
                         st.success(f"Re-ingested {n} chunks.")
                         st.rerun()
-
                     if st.button("Delete", key=f"del_{src['id']}", type="secondary"):
                         ingest.delete_source(src["id"], workspace=active_workspace)
                         st.rerun()
+                if st.checkbox("View/edit chunks", key=f"ch_{src['id']}"):
+                    for c in db.get_chunks_for_source(src["id"]):
+                        edited = st.text_area(f"Chunk {c['chunk_index']}", value=c["text"], height=120,
+                                              key=f"ct_{c['id']}")
+                        if edited != c["text"] and st.button("Save", key=f"sc_{c['id']}"):
+                            db.update_chunk_text(c["id"], edited)
+                            st.rerun()
 
-                # View / edit chunks
-                if st.checkbox("View chunks", key=f"chunks_{src['id']}"):
-                    chunks = db.get_chunks_for_source(src["id"])
-                    for c in chunks:
-                        edited = st.text_area(
-                            f"Chunk {c['chunk_index']}",
-                            value=c["text"],
-                            height=120,
-                            key=f"chunk_text_{c['id']}",
-                        )
-                        if edited != c["text"]:
-                            if st.button("Save edit", key=f"save_chunk_{c['id']}"):
-                                db.update_chunk_text(c["id"], edited)
-                                st.success(f"Chunk {c['chunk_index']} updated.")
-                                st.rerun()
+
+# ---------------------------------------------------------------------------
+# RSS FEEDS TAB
+# ---------------------------------------------------------------------------
+
+with tab_rss:
+    st.markdown("### RSS Feeds")
+    st.caption("Subscribe to blogs and news feeds. New entries are ingested into your knowledge base.")
+
+    with st.expander("Add new feed", expanded=True):
+        rss_url = st.text_input("Feed URL", placeholder="https://blog.example.com/feed.xml", key="rss_url")
+        rss_title = st.text_input("Feed title (optional)", key="rss_title")
+        rss_tags = _tag_input("rss_tags")
+        if st.button("Subscribe", type="primary"):
+            if rss_url.strip():
+                db.add_rss_feed(rss_url.strip(), title=rss_title.strip() or None,
+                                tags=rss_tags, workspace=active_workspace)
+                st.success("Feed added.")
+                st.rerun()
+
+    feeds = db.get_rss_feeds(workspace=active_workspace)
+    if not feeds:
+        st.info("No RSS feeds subscribed yet.")
+    else:
+        if st.button("Fetch all feeds"):
+            total_new = 0
+            for f in feeds:
+                if not f.get("active"):
+                    continue
+                with st.spinner(f"Fetching {f.get('title') or f['url']}..."):
+                    r = ingest.ingest_rss_feed(f["id"])
+                total_new += r["new_entries"]
+                if r["errors"]:
+                    for e in r["errors"]:
+                        st.error(e)
+            st.success(f"Fetched {total_new} new entries across all feeds.")
+
+        for f in feeds:
+            status = "Active" if f.get("active") else "Paused"
+            last = f.get("last_fetched", "never")
+            if last and last != "never":
+                last = last[:16].replace("T", " ")
+            with st.expander(f"{f.get('title') or f['url']}  —  {status}  |  Last: {last}"):
+                st.caption(f["url"])
+                if f.get("tags"):
+                    st.caption(f"Tags: {', '.join(f['tags'])}")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    if st.button("Fetch now", key=f"rfetch_{f['id']}"):
+                        with st.spinner("Fetching..."):
+                            r = ingest.ingest_rss_feed(f["id"])
+                        st.success(f"{r['new_entries']} new entries, {r['total_chunks']} chunks")
+                with col_b:
+                    label = "Pause" if f.get("active") else "Resume"
+                    if st.button(label, key=f"rpause_{f['id']}"):
+                        db.toggle_rss_feed(f["id"], not f.get("active"))
+                        st.rerun()
+                with col_c:
+                    if st.button("Remove", key=f"rdel_{f['id']}", type="secondary"):
+                        db.delete_rss_feed(f["id"])
+                        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -712,76 +676,129 @@ with tab_sources:
 # ---------------------------------------------------------------------------
 
 with tab_analytics:
-    _analytics_cfg = config.ui("analytics")
-    st.markdown(f"### {_analytics_cfg.get('heading', 'Knowledge Base Analytics')}")
+    st.markdown(f"### {config.ui('analytics').get('heading', 'Knowledge Base Analytics')}")
 
     stats = db.get_stats(workspace=active_workspace if active_workspace != "default" else None)
 
-    # Metric cards
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{stats["source_count"]}</div>
-            <div class="metric-label">Sources</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{stats["chunk_count"]}</div>
-            <div class="metric-label">Chunks</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{stats["query_count"]}</div>
-            <div class="metric-label">Queries</div>
-        </div>
-        """, unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    for col, val, label in [(col1, stats["source_count"], "Sources"),
+                             (col2, stats["chunk_count"], "Chunks"),
+                             (col3, stats["query_count"], "Queries"),
+                             (col4, f"${usage['total_cost_usd']:.4f}", "API Cost")]:
+        with col:
+            st.markdown(f'<div class="metric-card"><div class="metric-value">{val}</div>'
+                        f'<div class="metric-label">{label}</div></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     col_types, col_tags = st.columns(2)
-
     with col_types:
         st.markdown("#### Sources by Type")
         if stats["type_breakdown"]:
             for stype, count in stats["type_breakdown"].items():
-                pct = count / max(stats["source_count"], 1) * 100
-                st.markdown(f"**{stype}** — {count} ({pct:.0f}%)")
-                st.progress(pct / 100)
+                pct = count / max(stats["source_count"], 1)
+                st.markdown(f"**{stype}** — {count} ({pct:.0%})")
+                st.progress(pct)
         else:
             st.caption("No sources yet.")
-
     with col_tags:
         st.markdown("#### Tag Frequency")
         if stats["tag_frequency"]:
-            max_count = max(stats["tag_frequency"].values())
+            mx = max(stats["tag_frequency"].values())
             for tag, count in list(stats["tag_frequency"].items())[:15]:
-                st.markdown(f"**{tag}** — {count} source(s)")
-                st.progress(count / max_count)
+                st.markdown(f"**{tag}** — {count}")
+                st.progress(count / mx)
         else:
             st.caption("No tags yet.")
 
+    # Cost breakdown
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown("#### API Cost Breakdown")
+    if usage["by_model"]:
+        for m in usage["by_model"]:
+            st.markdown(f"**{m['model_id']}** — {m['calls']} calls, "
+                        f"{m['inp']:,} in / {m['out']:,} out tokens, ${m['cost']:.4f}")
+    if usage["by_operation"]:
+        st.markdown("**By operation:**")
+        for op in usage["by_operation"]:
+            st.caption(f"- {op['operation']}: {op['calls']} calls, ${op['cost']:.4f}")
+
     # Dedup
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    st.markdown(f"#### {_analytics_cfg.get('dedup_heading', 'Duplicate Detection')}")
-    st.caption(_analytics_cfg.get("dedup_caption", ""))
+    st.markdown("#### Duplicate Detection")
     if st.button("Scan for duplicates"):
-        with st.spinner("Comparing chunk embeddings..."):
+        with st.spinner("Comparing embeddings..."):
             dupes = ingest.find_duplicate_chunks(workspace=active_workspace)
         if not dupes:
-            st.success(_analytics_cfg.get("dedup_success", "No near-duplicate chunks found."))
+            st.success("No duplicates found.")
         else:
-            st.warning(f"Found **{len(dupes)}** near-duplicate chunk pair(s).")
+            st.warning(f"**{len(dupes)}** duplicate pair(s)")
             for d in dupes[:20]:
-                with st.expander(f"Similarity {d['similarity']:.2%} — {d['title_a']} / {d['title_b']}"):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.markdown(f"**{d['title_a']}**")
+                with st.expander(f"{d['similarity']:.2%} — {d['title_a']} / {d['title_b']}"):
+                    ca, cb = st.columns(2)
+                    with ca:
                         st.text(d["text_a"])
-                    with col_b:
-                        st.markdown(f"**{d['title_b']}**")
+                    with cb:
                         st.text(d["text_b"])
+
+
+# ---------------------------------------------------------------------------
+# EVALUATION TAB
+# ---------------------------------------------------------------------------
+
+with tab_eval:
+    st.markdown("### Evaluation Framework")
+    st.caption("Define question-answer pairs and measure retrieval quality.")
+
+    with st.expander("Add evaluation pair", expanded=False):
+        eq = st.text_input("Question", key="eval_q")
+        ea = st.text_area("Expected answer", key="eval_a", height=100)
+        et = _tag_input("eval_tags")
+        if st.button("Add pair"):
+            if eq.strip() and ea.strip():
+                db.add_eval_pair(eq.strip(), ea.strip(), tags=et, workspace=active_workspace)
+                st.success("Pair added.")
+                st.rerun()
+
+    pairs = db.get_eval_pairs(workspace=active_workspace)
+    if not pairs:
+        st.info("No evaluation pairs yet. Add some above.")
+    else:
+        st.markdown(f"**{len(pairs)} evaluation pair(s)**")
+        for p in pairs:
+            with st.expander(f"{p['question'][:80]}"):
+                st.markdown(f"**Expected:** {p['expected_answer']}")
+                if st.button("Delete", key=f"edel_{p['id']}", type="secondary"):
+                    db.delete_eval_pair(p["id"])
+                    st.rerun()
+
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+        if st.button("Run evaluation", type="primary"):
+            with st.spinner("Running evaluation (this calls Claude for each pair)..."):
+                results = evaluate.run_evaluation(workspace=active_workspace)
+                summary = evaluate.compute_summary(results)
+
+            # Summary metrics
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Avg Score", f"{summary['avg_score']}/5")
+            with c2:
+                st.metric("Min", summary["min_score"])
+            with c3:
+                st.metric("Max", summary["max_score"])
+
+            # Distribution
+            st.markdown("**Score distribution:**")
+            for s in range(1, 6):
+                count = summary["score_distribution"].get(s, 0)
+                st.markdown(f'<span class="eval-score-{s}">{"★" * s}{"☆" * (5-s)}</span> — {count} pair(s)',
+                            unsafe_allow_html=True)
+
+            # Detail
+            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+            for r in results:
+                with st.expander(f"{'★' * r['score']}{'☆' * (5 - r['score'])} — {r['question'][:60]}"):
+                    st.markdown(f"**Expected:** {r['expected']}")
+                    st.markdown(f"**Actual:** {r['actual']}")
+                    st.markdown(f"**Reasoning:** {r['reasoning']}")

@@ -87,8 +87,8 @@ def fetch_url_text(url: str) -> tuple[str, bool]:
     return text, len(text) < MIN_CONTENT_LENGTH
 
 
-def extract_pdf_text(file_bytes: bytes) -> str:
-    """Extract text from a PDF file (bytes)."""
+def extract_pdf_text(file_bytes: bytes, ocr: bool = False) -> str:
+    """Extract text from a PDF file (bytes). Falls back to OCR if enabled and text is sparse."""
     import io
     text_parts = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -96,7 +96,26 @@ def extract_pdf_text(file_bytes: bytes) -> str:
             page_text = page.extract_text()
             if page_text:
                 text_parts.append(page_text)
-    return "\n\n".join(text_parts)
+
+    text = "\n\n".join(text_parts)
+
+    # If we got very little text and OCR is enabled, try OCR
+    if ocr and len(text.split()) < 50:
+        try:
+            import pytesseract
+            from PIL import Image
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(file_bytes, dpi=300)
+            ocr_parts = []
+            for img in images:
+                ocr_text = pytesseract.image_to_string(img)
+                if ocr_text.strip():
+                    ocr_parts.append(ocr_text.strip())
+            if ocr_parts:
+                text = "\n\n".join(ocr_parts)
+        except ImportError:
+            pass  # OCR deps not installed — return what we have
+    return text
 
 
 def extract_docx_text(file_bytes: bytes) -> str:
@@ -334,9 +353,10 @@ def ingest_pdf(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ocr: bool = False,
 ) -> int:
     """Extract text from a PDF and ingest it. Returns chunk count."""
-    text = extract_pdf_text(file_bytes)
+    text = extract_pdf_text(file_bytes, ocr=ocr)
     return ingest_text(text, title=title, source_type="pdf", tags=tags,
                        workspace=workspace, embed_model_id=embed_model_id)
 
@@ -361,12 +381,13 @@ def ingest_file(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ocr: bool = False,
 ) -> int:
     """Ingest a file based on its extension. Returns chunk count."""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext == "pdf":
         return ingest_pdf(file_bytes, title=title, tags=tags, workspace=workspace,
-                          embed_model_id=embed_model_id)
+                          embed_model_id=embed_model_id, ocr=ocr)
     elif ext == "docx":
         return ingest_docx(file_bytes, title=title, tags=tags, workspace=workspace,
                            embed_model_id=embed_model_id)
@@ -408,6 +429,82 @@ def ingest_bulk_urls(
         except Exception as e:
             results.append({"url": url, "chunks": 0, "warning": False, "error": str(e)})
     return results
+
+
+def fetch_rss_feed(feed_url: str) -> list[dict]:
+    """Fetch an RSS/Atom feed and return a list of entries.
+
+    Each entry: {id, title, link, summary, published}.
+    """
+    import feedparser
+    feed = feedparser.parse(feed_url)
+    entries = []
+    for entry in feed.entries:
+        entries.append({
+            "id": getattr(entry, "id", entry.get("link", "")),
+            "title": getattr(entry, "title", "Untitled"),
+            "link": getattr(entry, "link", ""),
+            "summary": getattr(entry, "summary", ""),
+            "published": getattr(entry, "published", ""),
+        })
+    return entries
+
+
+def ingest_rss_feed(feed_id: int) -> dict:
+    """Fetch new entries from an RSS feed and ingest them.
+
+    Returns {new_entries, total_chunks, errors}.
+    """
+    feeds = db.get_rss_feeds()
+    feed = next((f for f in feeds if f["id"] == feed_id), None)
+    if not feed:
+        return {"new_entries": 0, "total_chunks": 0, "errors": ["Feed not found"]}
+
+    try:
+        entries = fetch_rss_feed(feed["url"])
+    except Exception as e:
+        return {"new_entries": 0, "total_chunks": 0, "errors": [str(e)]}
+
+    last_id = feed.get("last_entry_id")
+    new_entries = 0
+    total_chunks = 0
+    errors = []
+
+    for entry in entries:
+        if last_id and entry["id"] == last_id:
+            break  # Already seen this entry and everything after it
+
+        # Try to fetch full article text, fall back to summary
+        text = ""
+        if entry["link"]:
+            try:
+                text, _ = fetch_url_text(entry["link"])
+            except Exception:
+                text = entry.get("summary", "")
+        if not text:
+            text = entry.get("summary", "")
+        if not text.strip():
+            continue
+
+        try:
+            n = ingest_text(
+                text,
+                title=entry["title"],
+                source_type="rss",
+                url=entry["link"],
+                tags=feed.get("tags"),
+                workspace=feed.get("workspace", "default"),
+            )
+            total_chunks += n
+            new_entries += 1
+        except Exception as e:
+            errors.append(f"{entry['title']}: {e}")
+
+    # Update last fetched
+    if entries:
+        db.update_rss_feed_fetched(feed_id, entries[0]["id"])
+
+    return {"new_entries": new_entries, "total_chunks": total_chunks, "errors": errors}
 
 
 def delete_source(source_id: int, workspace: str | None = None) -> None:

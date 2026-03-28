@@ -43,6 +43,37 @@ def _get_conn() -> sqlite3.Connection:
             tags_used   TEXT    NOT NULL DEFAULT '[]',
             searched_at TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_id      TEXT    NOT NULL,
+            operation     TEXT    NOT NULL,
+            input_tokens  INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd      REAL    NOT NULL DEFAULT 0.0,
+            created_at    TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rss_feeds (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            url           TEXT    NOT NULL UNIQUE,
+            title         TEXT,
+            tags          TEXT    NOT NULL DEFAULT '[]',
+            workspace     TEXT    NOT NULL DEFAULT 'default',
+            last_fetched  TEXT,
+            last_entry_id TEXT,
+            active        INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS eval_pairs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            question        TEXT    NOT NULL,
+            expected_answer TEXT    NOT NULL,
+            tags            TEXT    NOT NULL DEFAULT '[]',
+            workspace       TEXT    NOT NULL DEFAULT 'default',
+            created_at      TEXT    NOT NULL
+        );
         """
     )
     # Add workspace column if missing (migration for existing DBs)
@@ -274,3 +305,154 @@ def get_stats(workspace: str | None = None) -> dict:
         "type_breakdown": {r["source_type"]: r["c"] for r in type_counts},
         "tag_frequency": dict(sorted(tag_freq.items(), key=lambda x: x[1], reverse=True)),
     }
+
+
+# ---------------------------------------------------------------------------
+# API usage tracking
+# ---------------------------------------------------------------------------
+
+def log_api_usage(model_id: str, operation: str, input_tokens: int,
+                  output_tokens: int, cost_usd: float) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO api_usage (model_id, operation, input_tokens, output_tokens, cost_usd, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (model_id, operation, input_tokens, output_tokens, cost_usd,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_api_usage_stats() -> dict:
+    """Return aggregate API usage stats."""
+    conn = _get_conn()
+    total = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens),0) as inp, COALESCE(SUM(output_tokens),0) as out, "
+        "COALESCE(SUM(cost_usd),0) as cost, COUNT(*) as calls FROM api_usage"
+    ).fetchone()
+    by_model = conn.execute(
+        "SELECT model_id, COUNT(*) as calls, SUM(input_tokens) as inp, "
+        "SUM(output_tokens) as out, SUM(cost_usd) as cost "
+        "FROM api_usage GROUP BY model_id ORDER BY cost DESC"
+    ).fetchall()
+    by_operation = conn.execute(
+        "SELECT operation, COUNT(*) as calls, SUM(cost_usd) as cost "
+        "FROM api_usage GROUP BY operation ORDER BY cost DESC"
+    ).fetchall()
+    recent = conn.execute(
+        "SELECT * FROM api_usage ORDER BY created_at DESC LIMIT 20"
+    ).fetchall()
+    conn.close()
+    return {
+        "total_input_tokens": total["inp"],
+        "total_output_tokens": total["out"],
+        "total_cost_usd": round(total["cost"], 6),
+        "total_calls": total["calls"],
+        "by_model": [dict(r) for r in by_model],
+        "by_operation": [dict(r) for r in by_operation],
+        "recent": [dict(r) for r in recent],
+    }
+
+
+# ---------------------------------------------------------------------------
+# RSS feeds
+# ---------------------------------------------------------------------------
+
+def add_rss_feed(url: str, title: str | None = None, tags: list[str] | None = None,
+                 workspace: str = "default") -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO rss_feeds (url, title, tags, workspace, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (url, title, json.dumps(tags or []), workspace,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    feed_id = cur.lastrowid
+    conn.close()
+    return feed_id
+
+
+def get_rss_feeds(workspace: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    if workspace:
+        rows = conn.execute(
+            "SELECT * FROM rss_feeds WHERE workspace = ? ORDER BY created_at DESC", (workspace,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM rss_feeds ORDER BY created_at DESC").fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["tags"] = json.loads(d.get("tags") or "[]")
+        result.append(d)
+    return result
+
+
+def update_rss_feed_fetched(feed_id: int, last_entry_id: str | None = None) -> None:
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE rss_feeds SET last_fetched = ?, last_entry_id = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), last_entry_id, feed_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_rss_feed(feed_id: int) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM rss_feeds WHERE id = ?", (feed_id,))
+    conn.commit()
+    conn.close()
+
+
+def toggle_rss_feed(feed_id: int, active: bool) -> None:
+    conn = _get_conn()
+    conn.execute("UPDATE rss_feeds SET active = ? WHERE id = ?", (1 if active else 0, feed_id))
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Evaluation pairs
+# ---------------------------------------------------------------------------
+
+def add_eval_pair(question: str, expected_answer: str, tags: list[str] | None = None,
+                  workspace: str = "default") -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO eval_pairs (question, expected_answer, tags, workspace, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (question, expected_answer, json.dumps(tags or []), workspace,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    pair_id = cur.lastrowid
+    conn.close()
+    return pair_id
+
+
+def get_eval_pairs(workspace: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    if workspace:
+        rows = conn.execute(
+            "SELECT * FROM eval_pairs WHERE workspace = ? ORDER BY created_at DESC", (workspace,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM eval_pairs ORDER BY created_at DESC").fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["tags"] = json.loads(d.get("tags") or "[]")
+        result.append(d)
+    return result
+
+
+def delete_eval_pair(pair_id: int) -> None:
+    conn = _get_conn()
+    conn.execute("DELETE FROM eval_pairs WHERE id = ?", (pair_id,))
+    conn.commit()
+    conn.close()

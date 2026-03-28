@@ -292,13 +292,15 @@ def ask(
     })
 
     client = _get_anthropic()
+    used_model = model_id or "claude-sonnet-4-20250514"
     response = client.messages.create(
-        model=model_id or "claude-sonnet-4-20250514",
+        model=used_model,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=messages,
     )
     answer = response.content[0].text
+    _track_api_usage(response.usage, used_model, "query")
 
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
@@ -347,9 +349,10 @@ def ask_stream(
     })
 
     client = _get_anthropic()
+    used_model = model_id or "claude-sonnet-4-20250514"
     full_answer = ""
     with client.messages.stream(
-        model=model_id or "claude-sonnet-4-20250514",
+        model=used_model,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=messages,
@@ -357,6 +360,9 @@ def ask_stream(
         for text in stream.text_stream:
             full_answer += text
             yield (text, sources, None)
+        final_message = stream.get_final_message()
+
+    _track_api_usage(final_message.usage, used_model, "query-stream")
 
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
@@ -388,4 +394,58 @@ def summarise_source(source_id: int) -> str:
         system=SUMMARY_PROMPT,
         messages=[{"role": "user", "content": combined}],
     )
+    _track_api_usage(response.usage, "claude-sonnet-4-20250514", "summarise")
     return response.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Auto-tagging
+# ---------------------------------------------------------------------------
+
+AUTO_TAG_PROMPT = """You are a tagging assistant. Given the following text, suggest 3–5 short, lowercase tags
+that describe the key topics. Return ONLY a comma-separated list of tags, nothing else.
+Example output: python, machine-learning, deployment, aws"""
+
+
+def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
+    """Use Claude to suggest tags for a piece of content."""
+    snippet = text[:max_chars]
+    client = _get_anthropic()
+    response = client.messages.create(
+        model="claude-3-5-haiku-20241022",  # cheap + fast for tagging
+        max_tokens=100,
+        system=AUTO_TAG_PROMPT,
+        messages=[{"role": "user", "content": snippet}],
+    )
+    raw = response.content[0].text.strip()
+    tags = [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()]
+    # Track cost
+    _track_api_usage(response.usage, "claude-3-5-haiku-20241022", "auto-tag")
+    return tags[:5]
+
+
+# ---------------------------------------------------------------------------
+# Cost / usage tracking
+# ---------------------------------------------------------------------------
+
+# Approximate pricing per 1M tokens (USD) — updated as of 2025
+_PRICING = {
+    "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
+    "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.0},
+}
+
+
+def _track_api_usage(usage, model_id: str, operation: str = "query") -> None:
+    """Log token usage and estimated cost to the database."""
+    import db as _db
+    input_tokens = getattr(usage, "input_tokens", 0)
+    output_tokens = getattr(usage, "output_tokens", 0)
+    pricing = _PRICING.get(model_id, {"input": 3.0, "output": 15.0})
+    cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+    _db.log_api_usage(
+        model_id=model_id,
+        operation=operation,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost,
+    )
