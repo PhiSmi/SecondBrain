@@ -18,7 +18,7 @@ from pathlib import Path
 import anthropic
 import chromadb
 from dotenv import load_dotenv
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import SentenceTransformer
 
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
@@ -29,7 +29,7 @@ FINAL_K = 5         # chunks sent to Claude after reranking
 RRF_K = 60          # constant for Reciprocal Rank Fusion
 
 _embed_model: SentenceTransformer | None = None
-_rerank_model: CrossEncoder | None = None
+_rerank_model = None  # CrossEncoder, lazy-loaded
 _collection: chromadb.Collection | None = None
 _client: anthropic.Anthropic | None = None
 
@@ -53,10 +53,11 @@ def _get_embed_model() -> SentenceTransformer:
     return _embed_model
 
 
-def _get_rerank_model() -> CrossEncoder:
+def _get_rerank_model():
+    """Lazy-load the cross-encoder reranking model (only when reranking is used)."""
     global _rerank_model
     if _rerank_model is None:
-        # Lightweight cross-encoder — runs on CPU, ~85MB
+        from sentence_transformers import CrossEncoder
         _rerank_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
     return _rerank_model
 

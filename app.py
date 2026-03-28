@@ -186,8 +186,8 @@ with tab_ask:
         with col1:
             use_hybrid = st.toggle("Hybrid search (BM25 + semantic)", value=True,
                                    help="Combines keyword and semantic search for better recall")
-            use_rerank = st.toggle("Reranking", value=True,
-                                   help="Cross-encoder reranks retrieved chunks for higher precision")
+            use_rerank = st.toggle("Reranking", value=False,
+                                   help="Cross-encoder reranks retrieved chunks for higher precision. Uses extra ~85MB RAM.")
         with col2:
             all_tags = db.get_all_tags()
             selected_tags = st.multiselect("Filter by tags", options=all_tags,
