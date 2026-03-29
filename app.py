@@ -22,21 +22,9 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Light / Dark mode toggle
+# Minimal, clean CSS that works with Streamlit's native theming
 # ---------------------------------------------------------------------------
-if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = True
-
 _theme = config.theme()
-_dark = st.session_state["dark_mode"]
-
-# Colours adapt to mode
-_bg = _theme["background_dark"] if _dark else "#F8F9FA"
-_surface = _theme["surface_color"] if _dark else "#FFFFFF"
-_surface_hover = _theme["surface_hover"] if _dark else "#F0F0F5"
-_text = _theme["text_primary"] if _dark else "#1A1A2E"
-_text_muted = _theme["text_secondary"] if _dark else "#6C6C8A"
-_border = _theme["border_color"] if _dark else "#E0E0E8"
 
 _css = f"""
 <style>
@@ -44,81 +32,71 @@ _css = f"""
 
 .stApp {{
     font-family: {_theme.get("font_family", "Inter, sans-serif")};
-    background-color: {_bg};
-    color: {_text};
 }}
 
+/* Gradient header */
 .app-header {{
     background: linear-gradient(135deg, {_theme["gradient_start"]} 0%, {_theme["gradient_end"]} 100%);
-    padding: 2rem 2.5rem;
-    border-radius: 16px;
-    margin-bottom: 1.5rem;
-    box-shadow: 0 8px 32px rgba(108, 92, 231, 0.15);
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
 }}
 .app-header h1 {{
-    color: white; font-size: 2.2rem; font-weight: 700; margin: 0 0 0.3rem 0; letter-spacing: -0.5px;
+    color: white; font-size: 1.8rem; font-weight: 700; margin: 0 0 0.2rem 0;
 }}
 .app-header p {{
-    color: rgba(255,255,255,0.85); font-size: 1.05rem; margin: 0; font-weight: 300;
+    color: rgba(255,255,255,0.85); font-size: 0.95rem; margin: 0; font-weight: 300;
 }}
 
+/* Metric cards */
 .metric-card {{
-    background: {_surface};
-    border: 1px solid {_border};
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
+    border: 1px solid rgba(108, 92, 231, 0.2);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
     text-align: center;
-    transition: transform 0.2s, box-shadow 0.2s;
-}}
-.metric-card:hover {{
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(108, 92, 231, 0.12);
+    margin-bottom: 0.5rem;
 }}
 .metric-card .metric-value {{
-    font-size: 2.2rem; font-weight: 700;
+    font-size: 2rem; font-weight: 700;
     background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
     -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1.2;
 }}
 .metric-card .metric-label {{
-    font-size: 0.85rem; color: {_text_muted}; text-transform: uppercase; letter-spacing: 1px; margin-top: 0.3rem;
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; margin-top: 0.2rem; opacity: 0.6;
 }}
 
+/* Workspace badge */
 .workspace-badge {{
     display: inline-block;
-    background: {_theme["primary_color"]}22;
-    border: 1px solid {_theme["primary_color"]}44;
-    border-radius: 20px; padding: 0.25rem 0.8rem; font-size: 0.82rem; font-weight: 500;
-    color: {_theme["primary_color"]}; margin-bottom: 0.5rem;
+    background: {_theme["primary_color"]}18;
+    border: 1px solid {_theme["primary_color"]}33;
+    border-radius: 16px; padding: 0.2rem 0.7rem; font-size: 0.8rem; font-weight: 500;
+    color: {_theme["primary_color"]};
 }}
 
+/* Chat bubbles */
 .chat-user {{
-    background: {_theme["primary_color"]}15;
     border-left: 3px solid {_theme["primary_color"]};
-    padding: 0.8rem 1.2rem; border-radius: 0 10px 10px 0; margin-bottom: 0.5rem;
+    padding: 0.6rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 0.5rem;
+    background: {_theme["primary_color"]}08;
 }}
-.chat-assistant {{ padding: 0.8rem 1.2rem; margin-bottom: 1rem; line-height: 1.7; }}
+.chat-assistant {{ padding: 0.6rem 1rem; margin-bottom: 0.8rem; line-height: 1.6; }}
 
+/* Divider */
 .section-divider {{
     height: 1px;
-    background: linear-gradient(90deg, transparent, {_border}, transparent);
-    margin: 1.5rem 0; border: none;
+    background: linear-gradient(90deg, transparent, rgba(128,128,128,0.2), transparent);
+    margin: 1.2rem 0; border: none;
 }}
 
-.stTabs [data-baseweb="tab-list"] {{ gap: 0.5rem; }}
-.stTabs [data-baseweb="tab"] {{ border-radius: 8px; padding: 0.5rem 1.2rem; font-weight: 500; }}
-
-.stButton > button[kind="primary"] {{
-    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    border: none; font-weight: 600; letter-spacing: 0.3px;
-}}
-
+/* Eval score colours */
 .eval-score-1, .eval-score-2 {{ color: {_theme["error_color"]}; font-weight: 700; }}
 .eval-score-3 {{ color: {_theme["warning_color"]}; font-weight: 700; }}
 .eval-score-4, .eval-score-5 {{ color: {_theme["success_color"]}; font-weight: 700; }}
 
-#MainMenu {{visibility: hidden;}}
-header {{visibility: hidden;}}
-footer {{visibility: hidden;}}
+/* Tab styling */
+.stTabs [data-baseweb="tab-list"] {{ gap: 0.3rem; }}
+.stTabs [data-baseweb="tab"] {{ border-radius: 8px 8px 0 0; padding: 0.4rem 1rem; font-weight: 500; }}
 </style>
 """
 st.markdown(_css, unsafe_allow_html=True)
@@ -140,13 +118,14 @@ def _check_password() -> bool:
         <p>Enter your password to continue</p>
     </div>
     """, unsafe_allow_html=True)
-    pwd = st.text_input("Password", type="password", label_visibility="collapsed")
-    if st.button("Enter", type="primary", use_container_width=True):
-        if pwd == correct:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
+    with st.form("login_form"):
+        pwd = st.text_input("Password", type="password", label_visibility="collapsed")
+        if st.form_submit_button("Enter", type="primary", use_container_width=True):
+            if pwd == correct:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
     return False
 
 
@@ -165,16 +144,10 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Sidebar — workspace + theme toggle
+# Sidebar — workspace + settings
 # ---------------------------------------------------------------------------
 ws_cfg = config.workspaces()
 with st.sidebar:
-    # Theme toggle
-    dark = st.toggle("Dark mode", value=st.session_state["dark_mode"], key="theme_toggle")
-    if dark != st.session_state["dark_mode"]:
-        st.session_state["dark_mode"] = dark
-        st.rerun()
-
     if ws_cfg.get("enabled"):
         st.markdown("### Workspace")
         predefined = ws_cfg.get("predefined", [])
@@ -206,13 +179,11 @@ with st.sidebar:
     else:
         active_workspace = "default"
 
-    # Cost summary in sidebar
+    # Cost summary
     usage = db.get_api_usage_stats()
     if usage["total_calls"] > 0:
         st.markdown("---")
-        st.markdown("### API Usage")
-        st.caption(f"Calls: {usage['total_calls']}")
-        st.caption(f"Cost: ${usage['total_cost_usd']:.4f}")
+        st.caption(f"API calls: {usage['total_calls']}  ·  Cost: ${usage['total_cost_usd']:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +191,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 _ui = config.ui()
 tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval = st.tabs(
-    ["Ingest", "Ask", "History", "Sources", "RSS Feeds", "Analytics", "Eval"]
+    ["📥 Ingest", "💬 Ask", "📜 History", "📚 Sources", "📡 RSS Feeds", "📊 Analytics", "🧪 Eval"]
 )
 
 # ---------------------------------------------------------------------------
@@ -259,10 +230,10 @@ def _build_export_md(question: str, result: dict) -> str:
 # ---------------------------------------------------------------------------
 
 with tab_ingest:
-    st.markdown(f"### {_ingest_cfg.get('heading', 'Add Knowledge')}")
+    st.subheader(_ingest_cfg.get("heading", "Add Knowledge"))
 
     input_types = _ingest_cfg.get("input_types", ["Paste text", "URL", "File upload", "YouTube", "Bulk URLs"])
-    input_type = st.radio("Input type", input_types, horizontal=True)
+    input_type = st.radio("Input type", input_types, horizontal=True, label_visibility="collapsed")
 
     # Embedding model picker
     embed_models = config.models("embedding")
@@ -275,18 +246,21 @@ with tab_ingest:
         embed_model_id = embed_models[embed_names.index(embed_choice)]["id"]
     with col_autotag:
         use_autotag = st.toggle("Auto-tag with AI", value=False,
-                                help="Use Claude Haiku to suggest tags automatically")
+                                help="Use Claude to suggest tags automatically")
     with col_ocr:
         use_ocr = st.toggle("OCR for scanned PDFs", value=False,
-                             help="Use Tesseract OCR for image-based PDFs. Requires tesseract installed.")
+                             help="Use Tesseract OCR for image-based PDFs")
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     if input_type == "Paste text":
         title = st.text_input("Title", placeholder=_ingest_cfg.get("paste_title_placeholder", ""))
-        text = st.text_area(_ingest_cfg.get("paste_area_placeholder", "Paste content here"), height=300)
+        text = st.text_area("Content", placeholder=_ingest_cfg.get("paste_area_placeholder", "Paste content here"),
+                            height=250)
         tags = _tag_input("tags_text")
 
         if use_autotag and text.strip():
-            if st.button("Suggest tags"):
+            if st.button("💡 Suggest tags"):
                 with st.spinner("Asking Claude for tag suggestions..."):
                     suggested = query.suggest_tags(text)
                 st.info(f"Suggested: **{', '.join(suggested)}**")
@@ -398,14 +372,14 @@ with tab_ingest:
 
     # Import KB
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    st.markdown(f"### {_ingest_cfg.get('import_heading', 'Import Knowledge Base')}")
-    import_file = st.file_uploader("Upload a SecondBrain export (.json)", type=["json"], key="import_kb")
-    if import_file and st.button("Import", type="secondary"):
-        with st.spinner("Importing..."):
-            data = json.loads(import_file.read().decode("utf-8"))
-            result = ingest.import_knowledge_base(data, workspace=active_workspace)
-        st.success(f"Imported **{result['imported']}** sources, skipped {result['skipped']} duplicates.")
-        st.rerun()
+    with st.expander(_ingest_cfg.get("import_heading", "Import Knowledge Base")):
+        import_file = st.file_uploader("Upload a SecondBrain export (.json)", type=["json"], key="import_kb")
+        if import_file and st.button("Import", type="secondary"):
+            with st.spinner("Importing..."):
+                data = json.loads(import_file.read().decode("utf-8"))
+                result = ingest.import_knowledge_base(data, workspace=active_workspace)
+            st.success(f"Imported **{result['imported']}** sources, skipped {result['skipped']} duplicates.")
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +387,9 @@ with tab_ingest:
 # ---------------------------------------------------------------------------
 
 with tab_ask:
-    st.markdown(f"### {_ask_cfg.get('heading', 'Ask Your Knowledge Base')}")
+    st.subheader(_ask_cfg.get("heading", "Ask Your Knowledge Base"))
 
-    with st.expander(_ask_cfg.get("search_options_label", "Search options"), expanded=False):
+    with st.expander("⚙️ Search options", expanded=False):
         col1, col2, col3 = st.columns(3)
         with col1:
             use_hybrid = st.toggle(_ask_cfg.get("hybrid_label", "Hybrid search"),
@@ -438,17 +412,20 @@ with tab_ask:
             use_streaming = st.toggle(_ask_cfg.get("stream_label", "Stream response"),
                                       value=config.retrieval().get("default_stream", True))
 
-    question = st.text_input("Your question", placeholder=_ask_cfg.get("question_placeholder", ""),
-                             label_visibility="collapsed")
+    # Form so pressing Enter submits the question
+    with st.form("ask_form", clear_on_submit=False):
+        question = st.text_input("Your question", placeholder=_ask_cfg.get("question_placeholder", ""),
+                                 label_visibility="collapsed")
+        col_ask, col_clear = st.columns([1, 5])
+        with col_ask:
+            ask_clicked = st.form_submit_button("Ask", type="primary", use_container_width=True)
+        with col_clear:
+            clear_clicked = st.form_submit_button("Clear conversation")
 
-    col_ask, col_clear = st.columns([1, 5])
-    with col_ask:
-        ask_clicked = st.button("Ask", type="primary", use_container_width=True)
-    with col_clear:
-        if st.button("Clear conversation"):
-            for k in ["chat_history", "last_result", "last_question"]:
-                st.session_state.pop(k, None)
-            st.rerun()
+    if clear_clicked:
+        for k in ["chat_history", "last_result", "last_question"]:
+            st.session_state.pop(k, None)
+        st.rerun()
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
@@ -488,7 +465,7 @@ with tab_ask:
             st.session_state["last_question"] = question.strip()
             db.log_search(question.strip(), result["answer"], result.get("sources", []), selected_tags or [])
     elif ask_clicked:
-        st.error("Please enter a question.")
+        st.warning("Please enter a question.")
 
     # Display conversation
     if st.session_state["chat_history"]:
@@ -497,7 +474,7 @@ with tab_ask:
         for i in range(0, len(turns) - 1, 2):
             u = turns[i]["content"]
             a = turns[i + 1]["content"] if i + 1 < len(turns) else ""
-            st.markdown(f'<div class="chat-user"><strong>You</strong><br>{u}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-user"><strong>You:</strong> {u}</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="chat-assistant">{a}</div>', unsafe_allow_html=True)
 
         last = st.session_state.get("last_result")
@@ -505,15 +482,15 @@ with tab_ask:
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
             st.markdown("**Sources used**")
             for i, src in enumerate(last["sources"], 1):
-                with st.expander(f"Source {i}: {src['title']} (score: {src.get('score', 0)})"):
+                with st.expander(f"{i}. {src['title']} (score: {src.get('score', 0)})"):
                     if src["url"]:
-                        st.markdown(f"**URL:** {src['url']}")
+                        st.markdown(f"[{src['url']}]({src['url']})")
                     st.text(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
 
         last_result = st.session_state.get("last_result")
         if last_result:
             md = _build_export_md(st.session_state.get("last_question", ""), last_result)
-            st.download_button("Export as Markdown", data=md,
+            st.download_button("📄 Export as Markdown", data=md,
                                file_name=f"secondbrain_{datetime.date.today()}.md", mime="text/markdown")
 
 
@@ -522,7 +499,7 @@ with tab_ask:
 # ---------------------------------------------------------------------------
 
 with tab_history:
-    st.markdown(f"### {config.ui('history').get('heading', 'Search History')}")
+    st.subheader(config.ui("history").get("heading", "Search History"))
     history_items = db.get_search_history(limit=50)
     if not history_items:
         st.info(config.ui("history").get("empty_message", "No searches yet."))
@@ -536,9 +513,9 @@ with tab_history:
                 st.rerun()
         for item in history_items:
             at = item["searched_at"][:16].replace("T", " ")
-            with st.expander(f"{at} — {item['question'][:80]}"):
+            with st.expander(f"🕒 {at} — {item['question'][:80]}"):
                 st.markdown(item["answer"])
-                if st.button("Re-ask", key=f"reask_{item['id']}"):
+                if st.button("Re-ask this question", key=f"reask_{item['id']}"):
                     st.session_state["reask_question"] = item["question"]
                     st.rerun()
 
@@ -548,7 +525,7 @@ with tab_history:
 # ---------------------------------------------------------------------------
 
 with tab_sources:
-    st.markdown(f"### {config.ui('sources').get('heading', 'Ingested Sources')}")
+    st.subheader(config.ui("sources").get("heading", "Ingested Sources"))
 
     col_filter, col_export = st.columns([3, 1])
     with col_filter:
@@ -557,7 +534,7 @@ with tab_sources:
         if st.button("Export KB"):
             with st.spinner("Exporting..."):
                 export_data = ingest.export_knowledge_base(workspace=active_workspace)
-            st.download_button("Download", data=json.dumps(export_data, indent=2),
+            st.download_button("Download JSON", data=json.dumps(export_data, indent=2),
                                file_name=f"secondbrain_export_{datetime.date.today()}.json", mime="application/json")
 
     sources = db.get_all_sources(workspace=active_workspace)
@@ -568,7 +545,8 @@ with tab_sources:
         st.info(config.ui("sources").get("empty_message", "No sources ingested yet."))
     else:
         for src in sources:
-            with st.expander(f"{src['title']}  —  {src['chunk_count']} chunks  |  {src['source_type']}  |  {src['ingested_at'][:10]}"):
+            label = f"**{src['title']}**  ·  {src['chunk_count']} chunks  ·  {src['source_type']}  ·  {src['ingested_at'][:10]}"
+            with st.expander(label):
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     if src.get("url"):
@@ -589,7 +567,7 @@ with tab_sources:
                         if r.get("error"):
                             st.error(r["error"])
                         elif r["changed"]:
-                            st.warning(f"Changed ({r['old_length']} -> {r['new_length']} words)")
+                            st.warning(f"Changed ({r['old_length']} → {r['new_length']} words)")
                         else:
                             st.success("Unchanged")
                     if st.button("Re-ingest", key=f"ri_{src['id']}"):
@@ -614,7 +592,7 @@ with tab_sources:
 # ---------------------------------------------------------------------------
 
 with tab_rss:
-    st.markdown("### RSS Feeds")
+    st.subheader("RSS Feeds")
     st.caption("Subscribe to blogs and news feeds. New entries are ingested into your knowledge base.")
 
     with st.expander("Add new feed", expanded=True):
@@ -646,11 +624,11 @@ with tab_rss:
             st.success(f"Fetched {total_new} new entries across all feeds.")
 
         for f in feeds:
-            status = "Active" if f.get("active") else "Paused"
+            status = "🟢 Active" if f.get("active") else "⏸️ Paused"
             last = f.get("last_fetched", "never")
             if last and last != "never":
                 last = last[:16].replace("T", " ")
-            with st.expander(f"{f.get('title') or f['url']}  —  {status}  |  Last: {last}"):
+            with st.expander(f"{f.get('title') or f['url']}  ·  {status}  ·  Last: {last}"):
                 st.caption(f["url"])
                 if f.get("tags"):
                     st.caption(f"Tags: {', '.join(f['tags'])}")
@@ -676,7 +654,7 @@ with tab_rss:
 # ---------------------------------------------------------------------------
 
 with tab_analytics:
-    st.markdown(f"### {config.ui('analytics').get('heading', 'Knowledge Base Analytics')}")
+    st.subheader(config.ui("analytics").get("heading", "Knowledge Base Analytics"))
 
     stats = db.get_stats(workspace=active_workspace if active_workspace != "default" else None)
 
@@ -747,7 +725,7 @@ with tab_analytics:
 # ---------------------------------------------------------------------------
 
 with tab_eval:
-    st.markdown("### Evaluation Framework")
+    st.subheader("Evaluation Framework")
     st.caption("Define question-answer pairs and measure retrieval quality.")
 
     with st.expander("Add evaluation pair", expanded=False):

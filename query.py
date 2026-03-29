@@ -412,7 +412,7 @@ def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
     snippet = text[:max_chars]
     client = _get_anthropic()
     response = client.messages.create(
-        model="claude-3-5-haiku-20241022",  # cheap + fast for tagging
+        model="claude-haiku-4-5-20251001",  # cheap + fast for tagging
         max_tokens=100,
         system=AUTO_TAG_PROMPT,
         messages=[{"role": "user", "content": snippet}],
@@ -420,7 +420,7 @@ def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
     raw = response.content[0].text.strip()
     tags = [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()]
     # Track cost
-    _track_api_usage(response.usage, "claude-3-5-haiku-20241022", "auto-tag")
+    _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "auto-tag")
     return tags[:5]
 
 
@@ -431,7 +431,7 @@ def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
 # Approximate pricing per 1M tokens (USD) — updated as of 2025
 _PRICING = {
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-    "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.0},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
 }
 
 

@@ -3,7 +3,6 @@
 Run with: uvicorn api:app --host 0.0.0.0 --port 8000
 """
 
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,9 +11,9 @@ from pydantic import BaseModel
 
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
-import db
-import ingest
-import query
+import db  # noqa: E402
+import ingest  # noqa: E402
+import query  # noqa: E402
 
 app = FastAPI(
     title="SecondBrain API",

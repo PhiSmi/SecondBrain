@@ -102,8 +102,7 @@ def extract_pdf_text(file_bytes: bytes, ocr: bool = False) -> str:
     # If we got very little text and OCR is enabled, try OCR
     if ocr and len(text.split()) < 50:
         try:
-            import pytesseract
-            from PIL import Image
+            import pytesseract  # noqa: F401 (used below)
             from pdf2image import convert_from_bytes
             images = convert_from_bytes(file_bytes, dpi=300)
             ocr_parts = []

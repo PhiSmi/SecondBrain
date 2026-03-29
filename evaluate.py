@@ -61,7 +61,7 @@ def _score_answer(question: str, expected: str, actual: str) -> dict:
     """Use Claude to score an answer against the expected answer."""
     client = query._get_anthropic()
     response = client.messages.create(
-        model="claude-3-5-haiku-20241022",
+        model="claude-haiku-4-5-20251001",
         max_tokens=150,
         system=EVAL_PROMPT,
         messages=[{
@@ -70,7 +70,7 @@ def _score_answer(question: str, expected: str, actual: str) -> dict:
         }],
     )
     text = response.content[0].text.strip()
-    query._track_api_usage(response.usage, "claude-3-5-haiku-20241022", "evaluation")
+    query._track_api_usage(response.usage, "claude-haiku-4-5-20251001", "evaluation")
 
     # Parse score
     score = 3  # default

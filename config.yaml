@@ -25,7 +25,9 @@ ui:
     - "Ask"
     - "History"
     - "Sources"
+    - "RSS Feeds"
     - "Analytics"
+    - "Eval"
 
   # Ingest tab
   ingest:
@@ -112,8 +114,8 @@ models:
       id: "claude-sonnet-4-20250514"
       description: "Best balance of quality and speed"
       default: true
-    - name: "Claude Haiku 3.5"
-      id: "claude-3-5-haiku-20241022"
+    - name: "Claude Haiku 4.5"
+      id: "claude-haiku-4-5-20251001"
       description: "Fast and cheap"
 
   # Embedding model options
