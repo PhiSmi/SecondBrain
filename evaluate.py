@@ -30,7 +30,12 @@ def run_evaluation(workspace: str | None = None, hybrid: bool = True,
         )
 
         # Score the answer
-        score_result = _score_answer(pair["question"], pair["expected_answer"], result["answer"])
+        score_result = _score_answer(
+            pair["question"],
+            pair["expected_answer"],
+            result["answer"],
+            workspace=workspace or pair.get("workspace", "default"),
+        )
         results.append({
             "question": pair["question"],
             "expected": pair["expected_answer"],
@@ -57,7 +62,7 @@ SCORE: <number>
 REASONING: <one sentence explanation>"""
 
 
-def _score_answer(question: str, expected: str, actual: str) -> dict:
+def _score_answer(question: str, expected: str, actual: str, workspace: str = "default") -> dict:
     """Use Claude to score an answer against the expected answer."""
     client = query._get_anthropic()
     response = client.messages.create(
@@ -70,7 +75,12 @@ def _score_answer(question: str, expected: str, actual: str) -> dict:
         }],
     )
     text = response.content[0].text.strip()
-    query._track_api_usage(response.usage, "claude-haiku-4-5-20251001", "evaluation")
+    query._track_api_usage(
+        response.usage,
+        "claude-haiku-4-5-20251001",
+        "evaluation",
+        workspace=workspace,
+    )
 
     # Parse score
     score = 3  # default

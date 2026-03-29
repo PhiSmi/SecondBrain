@@ -1,5 +1,14 @@
 [server]
 fileWatcherType = "none"
+maxUploadSize = 15
 
 [logger]
-level = "error"
+level = "info"
+
+[theme]
+base = "dark"
+primaryColor = "#2B6CB0"
+backgroundColor = "#07131F"
+secondaryBackgroundColor = "#102235"
+textColor = "#ECF4FF"
+font = "sans serif"

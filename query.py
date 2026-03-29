@@ -23,20 +23,42 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
 import config
+import db
 
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
-_cfg = config.retrieval()
 CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "secondbrain"
-TOP_K = _cfg.get("top_k", 10)
-FINAL_K = _cfg.get("final_k", 5)
-RRF_K = _cfg.get("rrf_k", 60)
 
 _embed_models: dict[str, SentenceTransformer] = {}
 _rerank_model = None  # CrossEncoder, lazy-loaded
 _collections: dict[str, chromadb.Collection] = {}
+_chroma_client: chromadb.PersistentClient | None = None
 _client: anthropic.Anthropic | None = None
+
+
+def _retrieval_setting(key: str, default):
+    return config.retrieval().get(key, default)
+
+
+def _default_embed_model_id() -> str:
+    return config.default_embedding_model()
+
+
+def _normalise_model_id(model_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", model_id).strip("_").lower()
+
+
+def _legacy_collection_name(workspace: str | None = None) -> str:
+    ws = workspace or config.workspaces().get("default", "default")
+    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+
+
+def _get_chroma_client() -> chromadb.PersistentClient:
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return _chroma_client
 
 SYSTEM_PROMPT = """You are a helpful research assistant with access to the user's personal knowledge base. Follow these rules:
 
@@ -52,7 +74,7 @@ Be concise — each bullet should be one sentence. Do not add any preamble or cl
 
 
 def _get_embed_model(model_id: str | None = None) -> SentenceTransformer:
-    model_id = model_id or "all-MiniLM-L6-v2"
+    model_id = model_id or _default_embed_model_id()
     if model_id not in _embed_models:
         _embed_models[model_id] = SentenceTransformer(model_id)
     return _embed_models[model_id]
@@ -67,19 +89,36 @@ def _get_rerank_model():
     return _rerank_model
 
 
-def _collection_name(workspace: str | None = None) -> str:
+def _collection_name(workspace: str | None = None, embed_model_id: str | None = None) -> str:
     ws = workspace or config.workspaces().get("default", "default")
-    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+    model = _normalise_model_id(embed_model_id or _default_embed_model_id())
+    base = f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+    return f"{base}_{model}"
 
 
-def _get_collection(workspace: str | None = None) -> chromadb.Collection:
-    name = _collection_name(workspace)
+def _get_collection(
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
+) -> chromadb.Collection:
+    name = _collection_name(workspace, embed_model_id)
     if name not in _collections:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        _collections[name] = client.get_or_create_collection(
-            name=name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        client = _get_chroma_client()
+        try:
+            collection = client.get_collection(name=name)
+        except Exception:
+            legacy_name = _legacy_collection_name(workspace)
+            if (embed_model_id or _default_embed_model_id()) == _default_embed_model_id():
+                try:
+                    collection = client.get_collection(name=legacy_name)
+                    _collections[name] = collection
+                    return collection
+                except Exception:
+                    pass
+            collection = client.get_or_create_collection(
+                name=name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        _collections[name] = collection
     return _collections[name]
 
 
@@ -132,8 +171,9 @@ def _bm25_scores(query: str, documents: list[str], k1: float = 1.5, b: float = 0
 # Reciprocal Rank Fusion
 # ---------------------------------------------------------------------------
 
-def _rrf_merge(ranked_lists: list[list[str]], k: int = RRF_K) -> list[str]:
+def _rrf_merge(ranked_lists: list[list[str]], k: int | None = None) -> list[str]:
     """Merge multiple ranked ID lists into one via Reciprocal Rank Fusion."""
+    k = k if k is not None else _retrieval_setting("rrf_k", 60)
     scores: dict[str, float] = defaultdict(float)
     for ranked in ranked_lists:
         for rank, doc_id in enumerate(ranked, 1):
@@ -147,7 +187,7 @@ def _rrf_merge(ranked_lists: list[list[str]], k: int = RRF_K) -> list[str]:
 
 def retrieve(
     question: str,
-    top_k: int = TOP_K,
+    top_k: int | None = None,
     tags: list[str] | None = None,
     hybrid: bool = True,
     min_similarity: float = 0.0,
@@ -168,59 +208,88 @@ def retrieve(
     Returns:
         List of chunk dicts with keys: id, text, metadata, semantic_score.
     """
-    model = _get_embed_model(embed_model_id)
-    collection = _get_collection(workspace)
-
-    total = collection.count()
-    if total == 0:
-        return []
-
-    n = min(top_k, total)
+    top_k = top_k if top_k is not None else _retrieval_setting("top_k", 10)
 
     where: dict | None = None
     if tags:
-        where = {"$or": [{"tags": {"$contains": tag}} for tag in tags]} if len(tags) > 1 else {"tags": {"$contains": tags[0]}}
+        where = (
+            {"$or": [{"tags": {"$contains": tag}} for tag in tags]}
+            if len(tags) > 1
+            else {"tags": {"$contains": tags[0]}}
+        )
 
-    query_vec = model.encode([question], show_progress_bar=False).tolist()
-    sem_results = collection.query(
-        query_embeddings=query_vec,
-        n_results=n,
-        include=["documents", "metadatas", "distances"],
-        where=where,
-    )
-
-    sem_docs = sem_results["documents"][0]
-    sem_metas = sem_results["metadatas"][0]
-    sem_dists = sem_results["distances"][0]
-    sem_ids = sem_results["ids"][0]
+    model_ids = [embed_model_id] if embed_model_id else db.get_embedding_models(workspace=workspace)
+    if not model_ids:
+        model_ids = [_default_embed_model_id()]
 
     chunk_map: dict[str, dict] = {}
-    for doc, meta, dist, cid in zip(sem_docs, sem_metas, sem_dists, sem_ids):
-        score = round(1 - dist, 3)
-        if score >= min_similarity:
+    semantic_ranked_ids: list[str] = []
+
+    for model_id in model_ids:
+        collection = _get_collection(workspace, model_id)
+        total = collection.count()
+        if total == 0:
+            continue
+
+        model = _get_embed_model(model_id)
+        n = min(top_k, total)
+        query_vec = model.encode([question], show_progress_bar=False).tolist()
+        sem_results = collection.query(
+            query_embeddings=query_vec,
+            n_results=n,
+            include=["documents", "metadatas", "distances"],
+            where=where,
+        )
+
+        sem_docs = sem_results["documents"][0]
+        sem_metas = sem_results["metadatas"][0]
+        sem_dists = sem_results["distances"][0]
+        sem_ids = sem_results["ids"][0]
+
+        ranked_for_model = []
+        for doc, meta, dist, cid in zip(sem_docs, sem_metas, sem_dists, sem_ids):
+            score = round(1 - dist, 3)
+            if score < min_similarity:
+                continue
             chunk_map[cid] = {
                 "id": cid,
                 "text": doc,
                 "metadata": meta,
                 "semantic_score": score,
+                "embedding_model": model_id,
             }
+            ranked_for_model.append((score, cid))
 
-    filtered_ids = [cid for cid in sem_ids if cid in chunk_map]
+        semantic_ranked_ids.extend(
+            cid for _, cid in sorted(ranked_for_model, key=lambda item: item[0], reverse=True)
+        )
+
+    if not chunk_map:
+        return []
+
+    filtered_ids = [
+        cid for cid, _ in sorted(
+            ((cid, chunk["semantic_score"]) for cid, chunk in chunk_map.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
 
     if not hybrid:
-        return [chunk_map[cid] for cid in filtered_ids]
+        return [chunk_map[cid] for cid in filtered_ids[:top_k]]
 
     sem_texts = [chunk_map[cid]["text"] for cid in filtered_ids]
     bm25 = _bm25_scores(question, sem_texts)
     bm25_ranked = [filtered_ids[i] for i in sorted(range(len(bm25)), key=lambda x: bm25[x], reverse=True)]
 
-    merged_ids = _rrf_merge([filtered_ids, bm25_ranked])
+    merged_ids = _rrf_merge([semantic_ranked_ids or filtered_ids, bm25_ranked])
 
-    return [chunk_map[cid] for cid in merged_ids if cid in chunk_map]
+    return [chunk_map[cid] for cid in merged_ids[:top_k] if cid in chunk_map]
 
 
-def rerank(question: str, chunks: list[dict], top_n: int = FINAL_K) -> list[dict]:
+def rerank(question: str, chunks: list[dict], top_n: int | None = None) -> list[dict]:
     """Rerank chunks using a cross-encoder model and return the top_n."""
+    top_n = top_n if top_n is not None else _retrieval_setting("final_k", 5)
     if len(chunks) <= top_n:
         return chunks
 
@@ -266,9 +335,15 @@ def ask(
 ) -> dict:
     """Full RAG pipeline. Returns {answer, sources, history}."""
     ui_cfg = config.ui("ask")
-    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid,
-                      min_similarity=min_similarity, workspace=workspace,
-                      embed_model_id=embed_model_id)
+    final_k = _retrieval_setting("final_k", 5)
+    chunks = retrieve(
+        question,
+        tags=tags,
+        hybrid=hybrid,
+        min_similarity=min_similarity,
+        workspace=workspace,
+        embed_model_id=embed_model_id,
+    )
 
     if not chunks:
         return {
@@ -279,9 +354,9 @@ def ask(
         }
 
     if use_rerank:
-        chunks = rerank(question, chunks, top_n=FINAL_K)
+        chunks = rerank(question, chunks, top_n=final_k)
     else:
-        chunks = chunks[:FINAL_K]
+        chunks = chunks[:final_k]
 
     context, sources = _build_context(chunks)
 
@@ -300,7 +375,7 @@ def ask(
         messages=messages,
     )
     answer = response.content[0].text
-    _track_api_usage(response.usage, used_model, "query")
+    _track_api_usage(response.usage, used_model, "query", workspace=workspace)
 
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
@@ -322,9 +397,15 @@ def ask_stream(
 ):
     """Streaming version of ask(). Yields (token, sources, updated_history) tuples."""
     ui_cfg = config.ui("ask")
-    chunks = retrieve(question, top_k=TOP_K, tags=tags, hybrid=hybrid,
-                      min_similarity=min_similarity, workspace=workspace,
-                      embed_model_id=embed_model_id)
+    final_k = _retrieval_setting("final_k", 5)
+    chunks = retrieve(
+        question,
+        tags=tags,
+        hybrid=hybrid,
+        min_similarity=min_similarity,
+        workspace=workspace,
+        embed_model_id=embed_model_id,
+    )
 
     if not chunks:
         yield (
@@ -336,9 +417,9 @@ def ask_stream(
         return
 
     if use_rerank:
-        chunks = rerank(question, chunks, top_n=FINAL_K)
+        chunks = rerank(question, chunks, top_n=final_k)
     else:
-        chunks = chunks[:FINAL_K]
+        chunks = chunks[:final_k]
 
     context, sources = _build_context(chunks)
 
@@ -362,7 +443,7 @@ def ask_stream(
             yield (text, sources, None)
         final_message = stream.get_final_message()
 
-    _track_api_usage(final_message.usage, used_model, "query-stream")
+    _track_api_usage(final_message.usage, used_model, "query-stream", workspace=workspace)
 
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})
@@ -394,7 +475,13 @@ def summarise_source(source_id: int) -> str:
         system=SUMMARY_PROMPT,
         messages=[{"role": "user", "content": combined}],
     )
-    _track_api_usage(response.usage, "claude-sonnet-4-20250514", "summarise")
+    source = _db.get_source(source_id)
+    _track_api_usage(
+        response.usage,
+        "claude-sonnet-4-20250514",
+        "summarise",
+        workspace=(source or {}).get("workspace", "default"),
+    )
     return response.content[0].text
 
 
@@ -407,7 +494,7 @@ that describe the key topics. Return ONLY a comma-separated list of tags, nothin
 Example output: python, machine-learning, deployment, aws"""
 
 
-def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
+def suggest_tags(text: str, max_chars: int = 2000, workspace: str = "default") -> list[str]:
     """Use Claude to suggest tags for a piece of content."""
     snippet = text[:max_chars]
     client = _get_anthropic()
@@ -420,7 +507,7 @@ def suggest_tags(text: str, max_chars: int = 2000) -> list[str]:
     raw = response.content[0].text.strip()
     tags = [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()]
     # Track cost
-    _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "auto-tag")
+    _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "auto-tag", workspace=workspace)
     return tags[:5]
 
 
@@ -435,7 +522,12 @@ _PRICING = {
 }
 
 
-def _track_api_usage(usage, model_id: str, operation: str = "query") -> None:
+def _track_api_usage(
+    usage,
+    model_id: str,
+    operation: str = "query",
+    workspace: str = "default",
+) -> None:
     """Log token usage and estimated cost to the database."""
     import db as _db
     input_tokens = getattr(usage, "input_tokens", 0)
@@ -448,4 +540,5 @@ def _track_api_usage(usage, model_id: str, operation: str = "query") -> None:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost,
+        workspace=workspace,
     )

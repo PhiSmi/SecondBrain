@@ -6,13 +6,16 @@ import yaml
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 _config: dict | None = None
+_config_mtime: float | None = None
 
 
 def _load() -> dict:
-    global _config
-    if _config is None:
+    global _config, _config_mtime
+    mtime = _CONFIG_PATH.stat().st_mtime
+    if _config is None or _config_mtime != mtime:
         with open(_CONFIG_PATH, encoding="utf-8") as f:
-            _config = yaml.safe_load(f)
+            _config = yaml.safe_load(f) or {}
+        _config_mtime = mtime
     return _config
 
 
@@ -50,9 +53,23 @@ def retrieval() -> dict:
     return _load().get("retrieval", {})
 
 
+def ingestion() -> dict:
+    return _load().get("ingestion", {})
+
+
 def workspaces() -> dict:
     return _load().get("workspaces", {})
 
 
 def recrawl() -> dict:
     return _load().get("recrawl", {})
+
+
+def default_embedding_model() -> str:
+    embedding_models = models("embedding")
+    default = next((m["id"] for m in embedding_models if m.get("default")), None)
+    if default:
+        return default
+    if embedding_models:
+        return embedding_models[0]["id"]
+    return "all-MiniLM-L6-v2"

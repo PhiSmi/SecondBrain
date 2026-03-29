@@ -47,6 +47,10 @@ ui:
     file_help: "Supported: PDF, DOCX, TXT, Markdown, CSV, JSON, RST"
     tag_label: "Tags (comma-separated, optional)"
     tag_placeholder: "e.g. aws, architecture, reliability"
+    background_label: "Run in background"
+    background_help: "Queue ingestion so larger imports do not block the app."
+    jobs_heading: "Background Jobs"
+    jobs_empty_message: "No ingestion jobs yet."
     import_heading: "Import Knowledge Base"
 
   # Ask tab
@@ -87,22 +91,22 @@ ui:
 # ---------------------------------------------------------------------------
 theme:
   # Colour palette — used in custom CSS
-  primary_color: "#6C5CE7"           # purple accent
-  secondary_color: "#00CEC9"         # teal accent
-  background_dark: "#0F0F1A"         # dark navy background
-  surface_color: "#1A1A2E"           # card / panel background
-  surface_hover: "#232340"           # card hover state
-  text_primary: "#E8E8F0"           # main text
-  text_secondary: "#9090B0"         # muted text / captions
-  border_color: "#2D2D4A"           # subtle borders
-  success_color: "#00E676"          # green for success states
-  warning_color: "#FFA726"          # orange for warnings
-  error_color: "#FF5252"            # red for errors
-  gradient_start: "#6C5CE7"         # header gradient from
-  gradient_end: "#00CEC9"           # header gradient to
+  primary_color: "#2B6CB0"           # cobalt accent
+  secondary_color: "#1F8A8A"         # deep teal accent
+  background_dark: "#07131F"         # deep blue-black background
+  surface_color: "#102235"           # card / panel background
+  surface_hover: "#173149"           # card hover state
+  text_primary: "#ECF4FF"            # main text
+  text_secondary: "#8CA7BF"          # muted text / captions
+  border_color: "#1E3A53"            # subtle borders
+  success_color: "#32C48D"           # green for success states
+  warning_color: "#F2A33C"           # amber for warnings
+  error_color: "#F16A5B"             # red for errors
+  gradient_start: "#0E3153"          # header gradient from
+  gradient_end: "#197278"            # header gradient to
 
   # Font
-  font_family: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif"
+  font_family: "'Manrope', 'Segoe UI', system-ui, -apple-system, sans-serif"
 
 # ---------------------------------------------------------------------------
 # Models
@@ -127,7 +131,7 @@ models:
     - name: "MiniLM-L12 (better quality, 384d)"
       id: "all-MiniLM-L12-v2"
       dimensions: 384
-    - name: "BGE-small (512d)"
+    - name: "BGE-small (384d)"
       id: "BAAI/bge-small-en-v1.5"
       dimensions: 384
     - name: "E5-small (384d)"
@@ -148,6 +152,14 @@ retrieval:
   default_stream: true               # streaming on by default
   min_similarity: 0.0                # default minimum similarity threshold
   dedup_threshold: 0.95              # cosine similarity threshold for duplicate detection
+
+# ---------------------------------------------------------------------------
+# Ingestion Limits
+# ---------------------------------------------------------------------------
+ingestion:
+  max_upload_mb: 15                  # fail fast on oversized uploads in Streamlit Cloud
+  max_source_chunks: 2000            # guardrail against OOM on very large documents
+  embedding_batch_size: 64           # batch size for vector writes to reduce peak memory
 
 # ---------------------------------------------------------------------------
 # Workspaces (Multi-collection support)

@@ -5,15 +5,13 @@ WORKDIR /app
 # System deps for pdfplumber and optional OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     tesseract-ocr \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Optional OCR dependencies (installed separately so base image works without them)
-RUN pip install --no-cache-dir pytesseract pdf2image Pillow feedparser || true
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

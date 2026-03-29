@@ -6,6 +6,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "metadata.db"
+DEFAULT_EMBED_MODEL = "all-MiniLM-L6-v2"
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    try:
+        conn.execute(f"SELECT {column} FROM {table} LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _source_from_row(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    source = dict(row)
+    source["tags"] = json.loads(source.get("tags") or "[]")
+    if not source.get("embedding_model"):
+        source["embedding_model"] = DEFAULT_EMBED_MODEL
+    return source
+
+
+def _job_from_row(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    job = dict(row)
+    job["payload"] = json.loads(job.get("payload") or "{}")
+    job["result"] = json.loads(job.get("result") or "{}")
+    return job
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -22,6 +49,7 @@ def _get_conn() -> sqlite3.Connection:
             chunk_count INTEGER NOT NULL,
             tags        TEXT    NOT NULL DEFAULT '[]',
             workspace   TEXT    NOT NULL DEFAULT 'default',
+            embedding_model TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2',
             ingested_at TEXT    NOT NULL
         );
 
@@ -41,6 +69,7 @@ def _get_conn() -> sqlite3.Connection:
             answer      TEXT    NOT NULL,
             sources     TEXT    NOT NULL DEFAULT '[]',
             tags_used   TEXT    NOT NULL DEFAULT '[]',
+            workspace   TEXT    NOT NULL DEFAULT 'default',
             searched_at TEXT    NOT NULL
         );
 
@@ -51,6 +80,7 @@ def _get_conn() -> sqlite3.Connection:
             input_tokens  INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             cost_usd      REAL    NOT NULL DEFAULT 0.0,
+            workspace     TEXT    NOT NULL DEFAULT 'default',
             created_at    TEXT    NOT NULL
         );
 
@@ -74,14 +104,29 @@ def _get_conn() -> sqlite3.Connection:
             workspace       TEXT    NOT NULL DEFAULT 'default',
             created_at      TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS ingest_jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_type    TEXT    NOT NULL,
+            title       TEXT    NOT NULL,
+            workspace   TEXT    NOT NULL DEFAULT 'default',
+            payload     TEXT    NOT NULL DEFAULT '{}',
+            status      TEXT    NOT NULL DEFAULT 'pending',
+            result      TEXT    NOT NULL DEFAULT '{}',
+            error       TEXT,
+            created_at  TEXT    NOT NULL,
+            started_at  TEXT,
+            finished_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ingest_jobs_status_created
+            ON ingest_jobs(status, created_at);
         """
     )
-    # Add workspace column if missing (migration for existing DBs)
-    try:
-        conn.execute("SELECT workspace FROM sources LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE sources ADD COLUMN workspace TEXT NOT NULL DEFAULT 'default'")
-        conn.commit()
+    _ensure_column(conn, "sources", "workspace", "TEXT NOT NULL DEFAULT 'default'")
+    _ensure_column(conn, "sources", "embedding_model", f"TEXT NOT NULL DEFAULT '{DEFAULT_EMBED_MODEL}'")
+    _ensure_column(conn, "search_history", "workspace", "TEXT NOT NULL DEFAULT 'default'")
+    _ensure_column(conn, "api_usage", "workspace", "TEXT NOT NULL DEFAULT 'default'")
     conn.commit()
     return conn
 
@@ -97,12 +142,13 @@ def log_source(
     chunk_count: int,
     tags: list[str] | None = None,
     workspace: str = "default",
+    embedding_model: str = DEFAULT_EMBED_MODEL,
 ) -> int:
     """Record a newly ingested source. Returns the source id."""
     conn = _get_conn()
     cur = conn.execute(
-        """INSERT INTO sources (title, source_type, url, chunk_count, tags, workspace, ingested_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO sources (title, source_type, url, chunk_count, tags, workspace, embedding_model, ingested_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             title,
             source_type,
@@ -110,6 +156,7 @@ def log_source(
             chunk_count,
             json.dumps(tags or []),
             workspace,
+            embedding_model,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -129,12 +176,15 @@ def get_all_sources(workspace: str | None = None) -> list[dict]:
     else:
         rows = conn.execute("SELECT * FROM sources ORDER BY ingested_at DESC").fetchall()
     conn.close()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["tags"] = json.loads(d.get("tags") or "[]")
-        result.append(d)
-    return result
+    return [_source_from_row(r) for r in rows]
+
+
+def get_source(source_id: int) -> dict | None:
+    """Return a single source by id, or None if it does not exist."""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    conn.close()
+    return _source_from_row(row)
 
 
 def get_all_tags(workspace: str | None = None) -> list[str]:
@@ -159,9 +209,32 @@ def get_workspaces() -> list[str]:
     return [r["workspace"] for r in rows]
 
 
+def get_embedding_models(workspace: str | None = None) -> list[str]:
+    """Return distinct embedding models used by stored sources."""
+    conn = _get_conn()
+    if workspace:
+        rows = conn.execute(
+            "SELECT DISTINCT embedding_model FROM sources WHERE workspace = ? ORDER BY embedding_model",
+            (workspace,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT embedding_model FROM sources ORDER BY embedding_model"
+        ).fetchall()
+    conn.close()
+    return [r["embedding_model"] or DEFAULT_EMBED_MODEL for r in rows]
+
+
 def update_source_tags(source_id: int, tags: list[str]) -> None:
     conn = _get_conn()
     conn.execute("UPDATE sources SET tags = ? WHERE id = ?", (json.dumps(tags), source_id))
+    conn.commit()
+    conn.close()
+
+
+def update_source_embedding_model(source_id: int, embedding_model: str) -> None:
+    conn = _get_conn()
+    conn.execute("UPDATE sources SET embedding_model = ? WHERE id = ?", (embedding_model, source_id))
     conn.commit()
     conn.close()
 
@@ -202,6 +275,25 @@ def get_chunks_for_source(source_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_chunk_preview_for_source(source_id: int) -> str:
+    """Return the first chunk text for a source, or an empty string."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT text FROM chunks WHERE source_id = ? ORDER BY chunk_index LIMIT 1",
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    return row["text"] if row else ""
+
+
+def get_chunk(chunk_id: int) -> dict | None:
+    """Return a single chunk row by id."""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_chroma_ids_for_source(source_id: int) -> list[str]:
     """Return all ChromaDB IDs for chunks belonging to a source."""
     conn = _get_conn()
@@ -224,25 +316,37 @@ def update_chunk_text(chunk_id: int, new_text: str) -> None:
 # Search history
 # ---------------------------------------------------------------------------
 
-def log_search(question: str, answer: str, sources: list[dict], tags_used: list[str]) -> None:
+def log_search(
+    question: str,
+    answer: str,
+    sources: list[dict],
+    tags_used: list[str],
+    workspace: str = "default",
+) -> None:
     """Record a search query and its answer."""
     conn = _get_conn()
     conn.execute(
-        """INSERT INTO search_history (question, answer, sources, tags_used, searched_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (question, answer, json.dumps(sources), json.dumps(tags_used),
+        """INSERT INTO search_history (question, answer, sources, tags_used, workspace, searched_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (question, answer, json.dumps(sources), json.dumps(tags_used), workspace,
          datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
 
 
-def get_search_history(limit: int = 50) -> list[dict]:
+def get_search_history(limit: int = 50, workspace: str | None = None) -> list[dict]:
     """Return recent search history, newest first."""
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM search_history ORDER BY searched_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    if workspace:
+        rows = conn.execute(
+            "SELECT * FROM search_history WHERE workspace = ? ORDER BY searched_at DESC LIMIT ?",
+            (workspace, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM search_history ORDER BY searched_at DESC LIMIT ?", (limit,)
+        ).fetchall()
     conn.close()
     result = []
     for r in rows:
@@ -253,10 +357,13 @@ def get_search_history(limit: int = 50) -> list[dict]:
     return result
 
 
-def delete_search_history() -> int:
+def delete_search_history(workspace: str | None = None) -> int:
     """Delete all search history. Returns count of deleted rows."""
     conn = _get_conn()
-    cur = conn.execute("DELETE FROM search_history")
+    if workspace:
+        cur = conn.execute("DELETE FROM search_history WHERE workspace = ?", (workspace,))
+    else:
+        cur = conn.execute("DELETE FROM search_history")
     conn.commit()
     count = cur.rowcount
     conn.close()
@@ -283,7 +390,13 @@ def get_stats(workspace: str | None = None) -> dict:
     else:
         chunk_count = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
 
-    query_count = conn.execute("SELECT COUNT(*) as c FROM search_history").fetchone()["c"]
+    if workspace:
+        query_count = conn.execute(
+            "SELECT COUNT(*) as c FROM search_history WHERE workspace = ?",
+            (workspace,),
+        ).fetchone()["c"]
+    else:
+        query_count = conn.execute("SELECT COUNT(*) as c FROM search_history").fetchone()["c"]
 
     type_counts = conn.execute(
         f"SELECT source_type, COUNT(*) as c FROM sources{ws_filter} GROUP BY source_type ORDER BY c DESC",
@@ -312,36 +425,42 @@ def get_stats(workspace: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def log_api_usage(model_id: str, operation: str, input_tokens: int,
-                  output_tokens: int, cost_usd: float) -> None:
+                  output_tokens: int, cost_usd: float, workspace: str = "default") -> None:
     conn = _get_conn()
     conn.execute(
-        """INSERT INTO api_usage (model_id, operation, input_tokens, output_tokens, cost_usd, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (model_id, operation, input_tokens, output_tokens, cost_usd,
+        """INSERT INTO api_usage (model_id, operation, input_tokens, output_tokens, cost_usd, workspace, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (model_id, operation, input_tokens, output_tokens, cost_usd, workspace,
          datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
 
 
-def get_api_usage_stats() -> dict:
+def get_api_usage_stats(workspace: str | None = None) -> dict:
     """Return aggregate API usage stats."""
     conn = _get_conn()
+    where_clause = " WHERE workspace = ?" if workspace else ""
+    params = (workspace,) if workspace else ()
     total = conn.execute(
         "SELECT COALESCE(SUM(input_tokens),0) as inp, COALESCE(SUM(output_tokens),0) as out, "
-        "COALESCE(SUM(cost_usd),0) as cost, COUNT(*) as calls FROM api_usage"
+        f"COALESCE(SUM(cost_usd),0) as cost, COUNT(*) as calls FROM api_usage{where_clause}",
+        params,
     ).fetchone()
     by_model = conn.execute(
         "SELECT model_id, COUNT(*) as calls, SUM(input_tokens) as inp, "
         "SUM(output_tokens) as out, SUM(cost_usd) as cost "
-        "FROM api_usage GROUP BY model_id ORDER BY cost DESC"
+        f"FROM api_usage{where_clause} GROUP BY model_id ORDER BY cost DESC",
+        params,
     ).fetchall()
     by_operation = conn.execute(
         "SELECT operation, COUNT(*) as calls, SUM(cost_usd) as cost "
-        "FROM api_usage GROUP BY operation ORDER BY cost DESC"
+        f"FROM api_usage{where_clause} GROUP BY operation ORDER BY cost DESC",
+        params,
     ).fetchall()
     recent = conn.execute(
-        "SELECT * FROM api_usage ORDER BY created_at DESC LIMIT 20"
+        f"SELECT * FROM api_usage{where_clause} ORDER BY created_at DESC LIMIT 20",
+        params,
     ).fetchall()
     conn.close()
     return {
@@ -353,6 +472,123 @@ def get_api_usage_stats() -> dict:
         "by_operation": [dict(r) for r in by_operation],
         "recent": [dict(r) for r in recent],
     }
+
+
+# ---------------------------------------------------------------------------
+# Background ingest jobs
+# ---------------------------------------------------------------------------
+
+def create_ingest_job(
+    job_type: str,
+    title: str,
+    payload: dict,
+    workspace: str = "default",
+) -> int:
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO ingest_jobs (job_type, title, workspace, payload, status, created_at)
+           VALUES (?, ?, ?, ?, 'pending', ?)""",
+        (
+            job_type,
+            title,
+            workspace,
+            json.dumps(payload),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    job_id = cur.lastrowid
+    conn.close()
+    return job_id
+
+
+def get_ingest_job(job_id: int) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM ingest_jobs WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    return _job_from_row(row)
+
+
+def get_ingest_jobs(limit: int = 25, workspace: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    if workspace:
+        rows = conn.execute(
+            "SELECT * FROM ingest_jobs WHERE workspace = ? ORDER BY created_at DESC LIMIT ?",
+            (workspace, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM ingest_jobs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    return [_job_from_row(row) for row in rows]
+
+
+def claim_next_ingest_job() -> dict | None:
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM ingest_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+
+        started_at = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            "UPDATE ingest_jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'",
+            (started_at, row["id"]),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        job = _job_from_row(row)
+        job["status"] = "running"
+        job["started_at"] = started_at
+        return job
+    finally:
+        conn.close()
+
+
+def complete_ingest_job(job_id: int, result: dict) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """UPDATE ingest_jobs
+           SET status = 'succeeded', result = ?, error = NULL, finished_at = ?
+           WHERE id = ?""",
+        (json.dumps(result), datetime.now(timezone.utc).isoformat(), job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fail_ingest_job(job_id: int, error: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """UPDATE ingest_jobs
+           SET status = 'failed', error = ?, finished_at = ?
+           WHERE id = ?""",
+        (error, datetime.now(timezone.utc).isoformat(), job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def cancel_ingest_job(job_id: int) -> bool:
+    conn = _get_conn()
+    cur = conn.execute(
+        """UPDATE ingest_jobs
+           SET status = 'cancelled', finished_at = ?
+           WHERE id = ? AND status = 'pending'""",
+        (datetime.now(timezone.utc).isoformat(), job_id),
+    )
+    conn.commit()
+    cancelled = cur.rowcount == 1
+    conn.close()
+    return cancelled
 
 
 # ---------------------------------------------------------------------------

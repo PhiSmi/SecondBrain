@@ -1,15 +1,20 @@
 """SecondBrain — Streamlit UI."""
 
 import datetime
+import html
 import json
+import logging
 
 import streamlit as st
 
+import background_jobs
 import config
 import db
 import evaluate
 import ingest
 import query
+
+background_jobs.ensure_worker_running()
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -22,81 +27,280 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Minimal, clean CSS that works with Streamlit's native theming
+# Product-style visual layer that still plays well with native Streamlit widgets
 # ---------------------------------------------------------------------------
 _theme = config.theme()
 
 _css = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {{
+    --primary: {_theme["primary_color"]};
+    --secondary: {_theme["secondary_color"]};
+    --bg: {_theme["background_dark"]};
+    --surface: {_theme["surface_color"]};
+    --surface-hover: {_theme["surface_hover"]};
+    --text: {_theme["text_primary"]};
+    --muted: {_theme["text_secondary"]};
+    --border: {_theme["border_color"]};
+    --success: {_theme["success_color"]};
+    --warning: {_theme["warning_color"]};
+    --error: {_theme["error_color"]};
+}}
 
 .stApp {{
-    font-family: {_theme.get("font_family", "Inter, sans-serif")};
+    font-family: {_theme.get("font_family", "Manrope, sans-serif")};
+    color: var(--text);
+    background:
+        radial-gradient(circle at top right, {_theme["secondary_color"]}22 0%, transparent 28%),
+        radial-gradient(circle at top left, {_theme["primary_color"]}26 0%, transparent 34%),
+        linear-gradient(180deg, {_theme["background_dark"]} 0%, #08111d 100%);
 }}
 
-/* Gradient header */
+.main .block-container {{
+    max-width: 1280px;
+    padding-top: 1.6rem;
+    padding-bottom: 2.4rem;
+}}
+
+[data-testid="stSidebar"] {{
+    background:
+        radial-gradient(circle at top, {_theme["secondary_color"]}18 0%, transparent 32%),
+        linear-gradient(180deg, rgba(7,18,31,0.96), rgba(10,22,36,0.96));
+    border-right: 1px solid var(--border);
+}}
+
+[data-testid="stSidebar"] .block-container {{
+    padding-top: 1.35rem;
+}}
+
 .app-header {{
-    background: linear-gradient(135deg, {_theme["gradient_start"]} 0%, {_theme["gradient_end"]} 100%);
-    padding: 1.5rem 2rem;
-    border-radius: 12px;
-    margin-bottom: 1rem;
+    position: relative;
+    overflow: hidden;
+    background:
+        linear-gradient(135deg, {_theme["gradient_start"]} 0%, {_theme["gradient_end"]} 100%);
+    padding: 1.7rem 2rem 1.8rem;
+    border-radius: 22px;
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 26px 60px rgba(5, 14, 23, 0.36);
+    margin-bottom: 1.1rem;
 }}
+
+.app-header::after {{
+    content: "";
+    position: absolute;
+    inset: auto -10% -45% auto;
+    width: 320px;
+    height: 320px;
+    background: radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 70%);
+    pointer-events: none;
+}}
+
 .app-header h1 {{
-    color: white; font-size: 1.8rem; font-weight: 700; margin: 0 0 0.2rem 0;
+    color: white;
+    font-size: 2rem;
+    font-weight: 800;
+    margin: 0 0 0.35rem 0;
+    letter-spacing: -0.03em;
 }}
+
 .app-header p {{
-    color: rgba(255,255,255,0.85); font-size: 0.95rem; margin: 0; font-weight: 300;
+    color: rgba(255,255,255,0.82);
+    font-size: 1rem;
+    margin: 0;
+    max-width: 52rem;
+    line-height: 1.55;
 }}
 
-/* Metric cards */
+.hero-pills {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1rem;
+}}
+
+.hero-pill {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.45rem 0.8rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.92);
+    font-size: 0.82rem;
+    font-weight: 600;
+    backdrop-filter: blur(10px);
+}}
+
 .metric-card {{
-    border: 1px solid rgba(108, 92, 231, 0.2);
-    border-radius: 10px;
-    padding: 1rem 1.2rem;
-    text-align: center;
-    margin-bottom: 0.5rem;
+    background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00)),
+        rgba(8, 17, 29, 0.62);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 0.55rem;
+    box-shadow: 0 18px 40px rgba(4, 12, 20, 0.2);
 }}
+
+.metric-card .metric-kicker {{
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-bottom: 0.35rem;
+}}
+
 .metric-card .metric-value {{
-    font-size: 2rem; font-weight: 700;
-    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1.2;
+    font-size: 1.95rem;
+    font-weight: 800;
+    line-height: 1.05;
+    color: var(--text);
+    letter-spacing: -0.05em;
 }}
+
 .metric-card .metric-label {{
-    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; margin-top: 0.2rem; opacity: 0.6;
+    font-size: 0.84rem;
+    margin-top: 0.35rem;
+    color: var(--muted);
 }}
 
-/* Workspace badge */
+.workspace-badge, .meta-pill {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.32rem 0.7rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0.35rem 0.35rem 0;
+}}
+
 .workspace-badge {{
-    display: inline-block;
-    background: {_theme["primary_color"]}18;
-    border: 1px solid {_theme["primary_color"]}33;
-    border-radius: 16px; padding: 0.2rem 0.7rem; font-size: 0.8rem; font-weight: 500;
-    color: {_theme["primary_color"]};
+    background: {_theme["primary_color"]}16;
+    border-color: {_theme["primary_color"]}44;
+    color: white;
 }}
 
-/* Chat bubbles */
-.chat-user {{
-    border-left: 3px solid {_theme["primary_color"]};
-    padding: 0.6rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 0.5rem;
-    background: {_theme["primary_color"]}08;
+.sidebar-panel, .section-panel {{
+    background: rgba(9, 18, 30, 0.56);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 0.95rem 1rem;
+    margin-bottom: 0.85rem;
+    box-shadow: 0 14px 32px rgba(4, 12, 20, 0.18);
 }}
-.chat-assistant {{ padding: 0.6rem 1rem; margin-bottom: 0.8rem; line-height: 1.6; }}
 
-/* Divider */
+.section-panel h4, .sidebar-panel h4 {{
+    margin: 0 0 0.55rem 0;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+}}
+
 .section-divider {{
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(128,128,128,0.2), transparent);
-    margin: 1.2rem 0; border: none;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.14), transparent);
+    margin: 1.25rem 0;
+    border: none;
 }}
 
-/* Eval score colours */
 .eval-score-1, .eval-score-2 {{ color: {_theme["error_color"]}; font-weight: 700; }}
 .eval-score-3 {{ color: {_theme["warning_color"]}; font-weight: 700; }}
 .eval-score-4, .eval-score-5 {{ color: {_theme["success_color"]}; font-weight: 700; }}
 
-/* Tab styling */
-.stTabs [data-baseweb="tab-list"] {{ gap: 0.3rem; }}
-.stTabs [data-baseweb="tab"] {{ border-radius: 8px 8px 0 0; padding: 0.4rem 1rem; font-weight: 500; }}
+.stTabs [data-baseweb="tab-list"] {{
+    gap: 0.45rem;
+    background: rgba(9,18,30,0.5);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.35rem;
+}}
+
+.stTabs [data-baseweb="tab"] {{
+    border-radius: 999px;
+    padding: 0.45rem 1rem;
+    font-weight: 700;
+    color: var(--muted);
+    transition: all 0.2s ease;
+}}
+
+.stTabs [aria-selected="true"] {{
+    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
+    color: white !important;
+}}
+
+[data-testid="stExpander"] {{
+    background: rgba(9, 18, 30, 0.56);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+}}
+
+.stButton > button, .stDownloadButton > button {{
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-weight: 700;
+    box-shadow: none;
+}}
+
+.stButton > button[kind="primary"], .stDownloadButton > button {{
+    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
+    color: white;
+}}
+
+.stButton > button:hover, .stDownloadButton > button:hover {{
+    border-color: rgba(255,255,255,0.24);
+}}
+
+[data-testid="stTextInputRootElement"],
+[data-testid="stTextAreaRootElement"],
+[data-baseweb="select"] > div,
+[data-testid="stFileUploader"] section {{
+    border-radius: 16px !important;
+    border-color: var(--border) !important;
+    background: rgba(9, 18, 30, 0.56) !important;
+}}
+
+[data-testid="stChatMessage"] {{
+    background: rgba(9, 18, 30, 0.56);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 0.3rem 0.5rem;
+    margin-bottom: 0.65rem;
+}}
+
+.source-summary {{
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.5;
+}}
+
+.source-tools {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+}}
+
+.tiny-label {{
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+}}
+
+code {{
+    font-family: 'IBM Plex Mono', monospace !important;
+}}
 </style>
 """
 st.markdown(_css, unsafe_allow_html=True)
@@ -179,11 +383,76 @@ with st.sidebar:
     else:
         active_workspace = "default"
 
-    # Cost summary
-    usage = db.get_api_usage_stats()
-    if usage["total_calls"] > 0:
-        st.markdown("---")
-        st.caption(f"API calls: {usage['total_calls']}  ·  Cost: ${usage['total_cost_usd']:.4f}")
+    workspace_stats = db.get_stats(workspace=active_workspace)
+    workspace_usage = db.get_api_usage_stats(workspace=active_workspace)
+    global_usage = db.get_api_usage_stats()
+    workspace_models = db.get_embedding_models(workspace=active_workspace)
+
+    st.markdown(
+        f"""
+        <div class="sidebar-panel">
+            <h4>Workspace Snapshot</h4>
+            <div class="source-tools">
+                {_render_badges([
+                    f"{workspace_stats['source_count']} sources",
+                    f"{workspace_stats['chunk_count']} chunks",
+                    f"{workspace_stats['query_count']} searches",
+                ], class_name="workspace-badge")}
+            </div>
+            <div class="source-tools">
+                {_render_badges(
+                    [f"{len(workspace_models)} embedding model(s)"] + [_format_model_name(m) for m in workspace_models[:2]]
+                )}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if workspace_usage["total_calls"] > 0 or global_usage["total_calls"] > 0:
+        st.markdown(
+            f"""
+            <div class="sidebar-panel">
+                <h4>Usage</h4>
+                <div class="tiny-label">Current workspace</div>
+                <div style="font-size:1.15rem; font-weight:800; margin:0.25rem 0 0.55rem 0;">
+                    {workspace_usage['total_calls']} calls · ${workspace_usage['total_cost_usd']:.4f}
+                </div>
+                <div class="tiny-label">All workspaces</div>
+                <div style="font-size:0.95rem; color: var(--muted);">
+                    {global_usage['total_calls']} calls · ${global_usage['total_cost_usd']:.4f}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+hero_pills = [
+    f"Workspace: {active_workspace}",
+    f"{workspace_stats['source_count']} sources",
+    f"{workspace_stats['chunk_count']} chunks",
+]
+if workspace_models:
+    hero_pills.append(f"Embeddings: {_format_model_name(workspace_models[0])}")
+
+st.markdown(
+    f"""
+    <div class="hero-pills">
+        {_render_badges(hero_pills, class_name="hero-pill")}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+hero_col1, hero_col2, hero_col3, hero_col4 = st.columns(4)
+with hero_col1:
+    _render_metric_card(workspace_stats["source_count"], "Sources")
+with hero_col2:
+    _render_metric_card(workspace_stats["chunk_count"], "Chunks")
+with hero_col3:
+    _render_metric_card(workspace_stats["query_count"], "Searches")
+with hero_col4:
+    _render_metric_card(f"${workspace_usage['total_cost_usd']:.4f}", "Workspace Cost")
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +468,8 @@ tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval 
 # ---------------------------------------------------------------------------
 _ingest_cfg = config.ui("ingest")
 _ask_cfg = config.ui("ask")
+_ingestion_cfg = config.ingestion()
+logger = logging.getLogger(__name__)
 
 
 def _tag_input(key: str) -> list[str]:
@@ -225,6 +496,69 @@ def _build_export_md(question: str, result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_metric_card(value: str | int | float, label: str, kicker: str = "Workspace") -> None:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-kicker">{html.escape(kicker)}</div>
+            <div class="metric-value">{html.escape(str(value))}</div>
+            <div class="metric-label">{html.escape(label)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_badges(items: list[str], class_name: str = "meta-pill") -> str:
+    return "".join(
+        f'<span class="{class_name}">{html.escape(item)}</span>'
+        for item in items if item
+    )
+
+
+def _format_model_name(model_id: str | None) -> str:
+    if not model_id:
+        return "default"
+    model = next((m for m in config.models("embedding") if m["id"] == model_id), None)
+    return model["name"] if model else model_id
+
+
+def _source_preview(source_id: int, limit: int = 220) -> str:
+    preview = db.get_chunk_preview_for_source(source_id).strip().replace("\n", " ")
+    if not preview:
+        return "No extracted text stored for this source yet."
+    return preview[:limit] + ("..." if len(preview) > limit else "")
+
+
+def _format_timestamp(value: str | None) -> str:
+    if not value:
+        return "Not started"
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _job_summary(job: dict) -> str:
+    status = job.get("status")
+    result = job.get("result") or {}
+    if status == "pending":
+        return "Queued and waiting for the worker."
+    if status == "running":
+        started_at = _format_timestamp(job.get("started_at"))
+        return f"Running since {started_at}."
+    if status == "cancelled":
+        return "Cancelled before processing started."
+    if status == "failed":
+        return job.get("error") or "Job failed."
+    if job.get("job_type") == "bulk_urls":
+        return f"Completed {result.get('succeeded', 0)} of {result.get('total_urls', 0)} URLs."
+    if "chunks" in result:
+        return f"Stored {result['chunks']} chunks."
+    return "Completed."
+
+
 # ---------------------------------------------------------------------------
 # INGEST TAB
 # ---------------------------------------------------------------------------
@@ -240,7 +574,7 @@ with tab_ingest:
     embed_names = [m["name"] for m in embed_models]
     default_idx = next((i for i, m in enumerate(embed_models) if m.get("default")), 0)
 
-    col_embed, col_autotag, col_ocr = st.columns([2, 1, 1])
+    col_embed, col_autotag, col_ocr, col_queue = st.columns([2, 1, 1, 1.2])
     with col_embed:
         embed_choice = st.selectbox("Embedding model", embed_names, index=default_idx)
         embed_model_id = embed_models[embed_names.index(embed_choice)]["id"]
@@ -250,6 +584,15 @@ with tab_ingest:
     with col_ocr:
         use_ocr = st.toggle("OCR for scanned PDFs", value=False,
                              help="Use Tesseract OCR for image-based PDFs")
+    with col_queue:
+        queue_ingest = st.toggle(
+            _ingest_cfg.get("background_label", "Run in background"),
+            value=True,
+            help=_ingest_cfg.get(
+                "background_help",
+                "Queue ingestion in a background worker so the UI stays responsive.",
+            ),
+        )
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -262,7 +605,7 @@ with tab_ingest:
         if use_autotag and text.strip():
             if st.button("💡 Suggest tags"):
                 with st.spinner("Asking Claude for tag suggestions..."):
-                    suggested = query.suggest_tags(text)
+                    suggested = query.suggest_tags(text, workspace=active_workspace)
                 st.info(f"Suggested: **{', '.join(suggested)}**")
 
         if st.button("Ingest", type="primary"):
@@ -270,10 +613,20 @@ with tab_ingest:
                 st.error("Please paste some text.")
             elif not title.strip():
                 st.error("Please provide a title.")
+            elif queue_ingest:
+                job_id = background_jobs.queue_text_ingest(
+                    text,
+                    title=title.strip(),
+                    tags=tags,
+                    workspace=active_workspace,
+                    embed_model_id=embed_model_id,
+                    auto_tag=use_autotag and not tags,
+                )
+                st.success(f'Queued background job #{job_id} for "{title.strip()}".')
             else:
                 if use_autotag and not tags:
                     with st.spinner("Auto-tagging..."):
-                        tags = query.suggest_tags(text)
+                        tags = query.suggest_tags(text, workspace=active_workspace)
                 with st.spinner("Chunking and embedding..."):
                     n = ingest.ingest_text(text, title=title.strip(), tags=tags,
                                            workspace=active_workspace, embed_model_id=embed_model_id)
@@ -287,25 +640,51 @@ with tab_ingest:
         if st.button("Ingest URL", type="primary"):
             if not url.strip():
                 st.error("Please enter a URL.")
+            elif queue_ingest:
+                job_id = background_jobs.queue_url_ingest(
+                    url.strip(),
+                    title=title.strip() or None,
+                    tags=tags,
+                    workspace=active_workspace,
+                    embed_model_id=embed_model_id,
+                    auto_tag=use_autotag and not tags,
+                )
+                st.success(f"Queued background job #{job_id} for {url.strip()}.")
             else:
                 with st.spinner("Fetching and processing..."):
                     try:
-                        n, js_warn = ingest.ingest_url(url.strip(), title=title.strip() or None, tags=tags,
-                                                       workspace=active_workspace, embed_model_id=embed_model_id)
-                        if use_autotag and not tags:
-                            text_content, _ = ingest.fetch_url_text(url.strip())
-                            tags = query.suggest_tags(text_content)
+                        text_content, js_warn = ingest.fetch_url_text(url.strip())
+                        effective_tags = tags
+                        if use_autotag and not effective_tags and text_content.strip():
+                            effective_tags = query.suggest_tags(text_content, workspace=active_workspace)
+                        n = ingest.ingest_text(
+                            text_content,
+                            title=title.strip() or url.strip(),
+                            source_type="url",
+                            url=url.strip(),
+                            tags=effective_tags,
+                            workspace=active_workspace,
+                            embed_model_id=embed_model_id,
+                        )
                         if js_warn:
                             st.warning(f"Only {n} chunk(s) — page likely requires JavaScript.")
                         else:
-                            st.success(f"Ingested **{n}** chunks.")
+                            st.success(
+                                f"Ingested **{n}** chunks."
+                                + (f" Tags: {', '.join(effective_tags)}." if effective_tags else "")
+                            )
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
     elif input_type == "File upload":
+        file_help = _ingest_cfg.get("file_help", "")
+        max_upload_mb = _ingestion_cfg.get("max_upload_mb")
+        if max_upload_mb:
+            upload_note = f"Max upload: {max_upload_mb} MB"
+            file_help = f"{file_help}. {upload_note}" if file_help else upload_note
         uploaded = st.file_uploader("Upload a file",
                                     type=["pdf", "docx", "txt", "md", "csv", "json", "rst"],
-                                    help=_ingest_cfg.get("file_help", ""))
+                                    help=file_help)
         title = st.text_input("Title", placeholder="e.g. AWS Security Whitepaper")
         tags = _tag_input("tags_file")
         if st.button("Ingest file", type="primary"):
@@ -313,17 +692,41 @@ with tab_ingest:
                 st.error("Please upload a file.")
             elif not title.strip():
                 st.error("Please provide a title.")
+            elif max_upload_mb and uploaded.size > int(max_upload_mb) * 1024 * 1024:
+                st.error(
+                    f'File is {uploaded.size / (1024 * 1024):.1f} MB, which exceeds the '
+                    f"configured limit of {max_upload_mb} MB."
+                )
             else:
                 file_bytes = uploaded.read()
-                if use_autotag and not tags:
-                    with st.spinner("Auto-tagging..."):
-                        preview = file_bytes[:3000].decode("utf-8", errors="replace")
-                        tags = query.suggest_tags(preview)
-                with st.spinner("Extracting and embedding..."):
-                    n = ingest.ingest_file(file_bytes, uploaded.name, title=title.strip(), tags=tags,
-                                           workspace=active_workspace, embed_model_id=embed_model_id,
-                                           ocr=use_ocr)
-                st.success(f"Ingested **{n}** chunks from \"{title.strip()}\"")
+                if queue_ingest:
+                    job_id = background_jobs.queue_file_ingest(
+                        file_bytes,
+                        uploaded.name,
+                        title=title.strip(),
+                        tags=tags,
+                        workspace=active_workspace,
+                        embed_model_id=embed_model_id,
+                        ocr=use_ocr,
+                        auto_tag=use_autotag and not tags,
+                    )
+                    st.success(f'Queued background job #{job_id} for "{title.strip()}".')
+                else:
+                    logger.info(
+                        "Starting file ingest for '%s' (%s bytes) in workspace=%s",
+                        uploaded.name,
+                        uploaded.size,
+                        active_workspace,
+                    )
+                    if use_autotag and not tags:
+                        with st.spinner("Auto-tagging..."):
+                            preview = file_bytes[:3000].decode("utf-8", errors="replace")
+                            tags = query.suggest_tags(preview, workspace=active_workspace)
+                    with st.spinner("Extracting and embedding..."):
+                        n = ingest.ingest_file(file_bytes, uploaded.name, title=title.strip(), tags=tags,
+                                               workspace=active_workspace, embed_model_id=embed_model_id,
+                                               ocr=use_ocr)
+                    st.success(f'Ingested **{n}** chunks from "{title.strip()}"')
 
     elif input_type == "YouTube":
         url = st.text_input("YouTube URL", placeholder=_ingest_cfg.get("youtube_placeholder", ""))
@@ -333,6 +736,16 @@ with tab_ingest:
         if st.button("Ingest transcript", type="primary"):
             if not url.strip():
                 st.error("Please enter a YouTube URL.")
+            elif queue_ingest:
+                job_id = background_jobs.queue_youtube_ingest(
+                    url.strip(),
+                    title=title.strip() or None,
+                    tags=tags,
+                    workspace=active_workspace,
+                    embed_model_id=embed_model_id,
+                    auto_tag=use_autotag and not tags,
+                )
+                st.success(f"Queued background job #{job_id} for the transcript import.")
             else:
                 with st.spinner("Fetching transcript..."):
                     try:
@@ -350,6 +763,15 @@ with tab_ingest:
             urls = [u.strip() for u in urls_raw.splitlines() if u.strip()]
             if not urls:
                 st.error("Please enter at least one URL.")
+            elif queue_ingest:
+                job_id = background_jobs.queue_bulk_url_ingest(
+                    urls,
+                    tags=tags,
+                    workspace=active_workspace,
+                    embed_model_id=embed_model_id,
+                    auto_tag=use_autotag and not tags,
+                )
+                st.success(f"Queued background job #{job_id} for {len(urls)} URLs.")
             else:
                 progress = st.progress(0)
                 results = []
@@ -381,6 +803,87 @@ with tab_ingest:
             st.success(f"Imported **{result['imported']}** sources, skipped {result['skipped']} duplicates.")
             st.rerun()
 
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    jobs_header_col, jobs_refresh_col = st.columns([4, 1])
+    with jobs_header_col:
+        st.subheader(_ingest_cfg.get("jobs_heading", "Background Jobs"))
+        worker_state = "online" if background_jobs.worker_is_running() else "starting"
+        st.caption(f"Worker status: {worker_state}. Background jobs keep running across reruns.")
+    with jobs_refresh_col:
+        st.button("Refresh", key="refresh_background_jobs", use_container_width=True)
+
+    jobs = background_jobs.list_jobs(limit=12, workspace=active_workspace)
+    if not jobs:
+        st.info(_ingest_cfg.get("jobs_empty_message", "No ingestion jobs yet."))
+    else:
+        pending_jobs = sum(1 for job in jobs if job["status"] == "pending")
+        running_jobs = sum(1 for job in jobs if job["status"] == "running")
+        failed_jobs = sum(1 for job in jobs if job["status"] == "failed")
+        completed_jobs = sum(1 for job in jobs if job["status"] == "succeeded")
+        job_col1, job_col2, job_col3, job_col4 = st.columns(4)
+        with job_col1:
+            _render_metric_card(pending_jobs, "Pending", kicker="Jobs")
+        with job_col2:
+            _render_metric_card(running_jobs, "Running", kicker="Jobs")
+        with job_col3:
+            _render_metric_card(completed_jobs, "Completed", kicker="Jobs")
+        with job_col4:
+            _render_metric_card(failed_jobs, "Failed", kicker="Jobs")
+
+        for job in jobs:
+            with st.container(border=True):
+                content_col, action_col = st.columns([6, 1])
+                with content_col:
+                    st.markdown(f"**{job['title']}**")
+                    st.markdown(
+                        _render_badges(
+                            [
+                                f"#{job['id']}",
+                                job["job_type"].replace("_", " "),
+                                job["status"],
+                                job["workspace"],
+                            ]
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        f"Queued {_format_timestamp(job.get('created_at'))}"
+                        + (
+                            f" • Finished {_format_timestamp(job.get('finished_at'))}"
+                            if job.get("finished_at")
+                            else ""
+                        )
+                    )
+                    summary = _job_summary(job)
+                    if job["status"] == "failed":
+                        st.error(summary)
+                    elif job["status"] == "cancelled":
+                        st.warning(summary)
+                    elif job["status"] == "succeeded":
+                        st.success(summary)
+                    else:
+                        st.caption(summary)
+
+                    if job["job_type"] == "bulk_urls" and job.get("result", {}).get("results"):
+                        with st.expander("Batch details", expanded=False):
+                            for item in job["result"]["results"]:
+                                if item.get("error"):
+                                    st.error(f"{item['url']} — {item['error']}")
+                                elif item.get("warning"):
+                                    st.warning(f"{item['url']} — {item.get('chunks', 0)} chunks (JS-rendered)")
+                                else:
+                                    st.write(f"{item['url']} — {item.get('chunks', 0)} chunks")
+                with action_col:
+                    if job["status"] == "pending" and st.button(
+                        "Cancel",
+                        key=f"cancel_job_{job['id']}",
+                        use_container_width=True,
+                    ):
+                        if background_jobs.cancel_job(job["id"]):
+                            st.success(f"Cancelled job #{job['id']}.")
+                            st.rerun()
+                        st.warning(f"Job #{job['id']} could not be cancelled.")
+
 
 # ---------------------------------------------------------------------------
 # ASK TAB
@@ -388,6 +891,8 @@ with tab_ingest:
 
 with tab_ask:
     st.subheader(_ask_cfg.get("heading", "Ask Your Knowledge Base"))
+    if "reask_question" in st.session_state:
+        st.session_state["ask_question"] = st.session_state.pop("reask_question")
 
     with st.expander("⚙️ Search options", expanded=False):
         col1, col2, col3 = st.columns(3)
@@ -414,8 +919,12 @@ with tab_ask:
 
     # Form so pressing Enter submits the question
     with st.form("ask_form", clear_on_submit=False):
-        question = st.text_input("Your question", placeholder=_ask_cfg.get("question_placeholder", ""),
-                                 label_visibility="collapsed")
+        question = st.text_input(
+            "Your question",
+            placeholder=_ask_cfg.get("question_placeholder", ""),
+            label_visibility="collapsed",
+            key="ask_question",
+        )
         col_ask, col_clear = st.columns([1, 5])
         with col_ask:
             ask_clicked = st.form_submit_button("Ask", type="primary", use_container_width=True)
@@ -423,7 +932,7 @@ with tab_ask:
             clear_clicked = st.form_submit_button("Clear conversation")
 
     if clear_clicked:
-        for k in ["chat_history", "last_result", "last_question"]:
+        for k in ["chat_history", "last_result", "last_question", "ask_question"]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -454,7 +963,13 @@ with tab_ask:
                 st.session_state["chat_history"] = final_history
             st.session_state["last_result"] = {"answer": full_answer, "sources": sources}
             st.session_state["last_question"] = question.strip()
-            db.log_search(question.strip(), full_answer, sources, selected_tags or [])
+            db.log_search(
+                question.strip(),
+                full_answer,
+                sources,
+                selected_tags or [],
+                workspace=active_workspace,
+            )
         else:
             with st.spinner("Searching..."):
                 result = query.ask(question.strip(), history=st.session_state["chat_history"],
@@ -463,7 +978,13 @@ with tab_ask:
             st.session_state["chat_history"] = result["history"]
             st.session_state["last_result"] = result
             st.session_state["last_question"] = question.strip()
-            db.log_search(question.strip(), result["answer"], result.get("sources", []), selected_tags or [])
+            db.log_search(
+                question.strip(),
+                result["answer"],
+                result.get("sources", []),
+                selected_tags or [],
+                workspace=active_workspace,
+            )
     elif ask_clicked:
         st.warning("Please enter a question.")
 
@@ -474,8 +995,10 @@ with tab_ask:
         for i in range(0, len(turns) - 1, 2):
             u = turns[i]["content"]
             a = turns[i + 1]["content"] if i + 1 < len(turns) else ""
-            st.markdown(f'<div class="chat-user"><strong>You:</strong> {u}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="chat-assistant">{a}</div>', unsafe_allow_html=True)
+            with st.chat_message("user"):
+                st.markdown(u)
+            with st.chat_message("assistant"):
+                st.markdown(a)
 
         last = st.session_state.get("last_result")
         if last and last.get("sources"):
@@ -500,16 +1023,16 @@ with tab_ask:
 
 with tab_history:
     st.subheader(config.ui("history").get("heading", "Search History"))
-    history_items = db.get_search_history(limit=50)
+    history_items = db.get_search_history(limit=50, workspace=active_workspace)
     if not history_items:
         st.info(config.ui("history").get("empty_message", "No searches yet."))
     else:
         col_count, col_clear = st.columns([3, 1])
         with col_count:
-            st.caption(f"{len(history_items)} most recent searches")
+            st.caption(f"{len(history_items)} recent searches in {active_workspace}")
         with col_clear:
-            if st.button("Clear all history", type="secondary"):
-                db.delete_search_history()
+            if st.button("Clear workspace history", type="secondary"):
+                db.delete_search_history(workspace=active_workspace)
                 st.rerun()
         for item in history_items:
             at = item["searched_at"][:16].replace("T", " ")
@@ -527,17 +1050,36 @@ with tab_history:
 with tab_sources:
     st.subheader(config.ui("sources").get("heading", "Ingested Sources"))
 
-    col_filter, col_export = st.columns([3, 1])
+    col_search, col_filter, col_export = st.columns([2, 2, 1])
+    with col_search:
+        source_query = st.text_input("Search sources", placeholder="Filter by title or URL", key="src_query")
     with col_filter:
         filter_tags = st.multiselect("Filter by tag", options=db.get_all_tags(workspace=active_workspace), key="src_ft")
     with col_export:
         if st.button("Export KB"):
             with st.spinner("Exporting..."):
                 export_data = ingest.export_knowledge_base(workspace=active_workspace)
-            st.download_button("Download JSON", data=json.dumps(export_data, indent=2),
-                               file_name=f"secondbrain_export_{datetime.date.today()}.json", mime="application/json")
+            st.session_state["kb_export_payload"] = json.dumps(export_data, indent=2)
+            st.session_state["kb_export_workspace"] = active_workspace
+
+    if (
+        st.session_state.get("kb_export_payload")
+        and st.session_state.get("kb_export_workspace") == active_workspace
+    ):
+        st.download_button(
+            "Download JSON",
+            data=st.session_state["kb_export_payload"],
+            file_name=f"secondbrain_export_{datetime.date.today()}.json",
+            mime="application/json",
+        )
 
     sources = db.get_all_sources(workspace=active_workspace)
+    if source_query.strip():
+        q = source_query.strip().lower()
+        sources = [
+            s for s in sources
+            if q in s["title"].lower() or q in (s.get("url") or "").lower()
+        ]
     if filter_tags:
         sources = [s for s in sources if any(t in s["tags"] for t in filter_tags)]
 
@@ -549,13 +1091,34 @@ with tab_sources:
             with st.expander(label):
                 col1, col2 = st.columns([3, 1])
                 with col1:
+                    st.markdown(
+                        _render_badges(
+                            [
+                                src["source_type"],
+                                _format_model_name(src.get("embedding_model")),
+                                f"{len(src.get('tags') or [])} tag(s)",
+                            ]
+                            + list(src.get("tags") or []),
+                        ),
+                        unsafe_allow_html=True,
+                    )
                     if src.get("url"):
                         st.caption(src["url"])
+                    st.markdown(
+                        f'<div class="source-summary">{html.escape(_source_preview(src["id"]))}</div>',
+                        unsafe_allow_html=True,
+                    )
                     current_tags = ", ".join(src.get("tags") or [])
                     new_tags = st.text_input("Tags", value=current_tags, key=f"tags_{src['id']}")
                     if st.button("Save tags", key=f"st_{src['id']}"):
-                        db.update_source_tags(src["id"], [t.strip() for t in new_tags.split(",") if t.strip()])
-                        st.rerun()
+                        try:
+                            ingest.update_source_tags(
+                                src["id"],
+                                [t.strip() for t in new_tags.split(",") if t.strip()],
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to save tags: {e}")
                 with col2:
                     st.metric("Chunks", src["chunk_count"])
                     if st.button("Summarise", key=f"sum_{src['id']}"):
@@ -583,8 +1146,11 @@ with tab_sources:
                         edited = st.text_area(f"Chunk {c['chunk_index']}", value=c["text"], height=120,
                                               key=f"ct_{c['id']}")
                         if edited != c["text"] and st.button("Save", key=f"sc_{c['id']}"):
-                            db.update_chunk_text(c["id"], edited)
-                            st.rerun()
+                            try:
+                                ingest.update_chunk_text(c["id"], edited)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to save chunk: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +1222,13 @@ with tab_rss:
 with tab_analytics:
     st.subheader(config.ui("analytics").get("heading", "Knowledge Base Analytics"))
 
-    stats = db.get_stats(workspace=active_workspace if active_workspace != "default" else None)
+    stats = db.get_stats(workspace=active_workspace)
+    usage = db.get_api_usage_stats(workspace=active_workspace)
+    sources_in_workspace = db.get_all_sources(workspace=active_workspace)
+    model_breakdown: dict[str, int] = {}
+    for src in sources_in_workspace:
+        model_name = _format_model_name(src.get("embedding_model"))
+        model_breakdown[model_name] = model_breakdown.get(model_name, 0) + 1
 
     col1, col2, col3, col4 = st.columns(4)
     for col, val, label in [(col1, stats["source_count"], "Sources"),
@@ -669,7 +1241,7 @@ with tab_analytics:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    col_types, col_tags = st.columns(2)
+    col_types, col_tags, col_models = st.columns(3)
     with col_types:
         st.markdown("#### Sources by Type")
         if stats["type_breakdown"]:
@@ -688,6 +1260,15 @@ with tab_analytics:
                 st.progress(count / mx)
         else:
             st.caption("No tags yet.")
+    with col_models:
+        st.markdown("#### Embedding Models")
+        if model_breakdown:
+            mx = max(model_breakdown.values())
+            for model_name, count in sorted(model_breakdown.items(), key=lambda item: item[1], reverse=True):
+                st.markdown(f"**{model_name}** — {count}")
+                st.progress(count / mx)
+        else:
+            st.caption("No embeddings yet.")
 
     # Cost breakdown
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
@@ -712,7 +1293,9 @@ with tab_analytics:
         else:
             st.warning(f"**{len(dupes)}** duplicate pair(s)")
             for d in dupes[:20]:
-                with st.expander(f"{d['similarity']:.2%} — {d['title_a']} / {d['title_b']}"):
+                with st.expander(
+                    f"{d['similarity']:.2%} — {d['title_a']} / {d['title_b']} [{d['embedding_model']}]"
+                ):
                     ca, cb = st.columns(2)
                     with ca:
                         st.text(d["text_a"])

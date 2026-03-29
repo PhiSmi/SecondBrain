@@ -1,5 +1,7 @@
 """Tests for the config loader."""
 
+import tempfile
+import time
 import sys
 from pathlib import Path
 
@@ -35,6 +37,11 @@ class TestConfigLoader:
         assert ret["top_k"] == 10
         assert ret["final_k"] == 5
 
+    def test_ingestion_defaults(self):
+        ingest_cfg = config.ingestion()
+        assert ingest_cfg["max_upload_mb"] == 15
+        assert ingest_cfg["max_source_chunks"] == 2000
+
     def test_workspaces(self):
         ws = config.workspaces()
         assert ws["default"] == "default"
@@ -48,3 +55,26 @@ class TestConfigLoader:
     def test_get_helper(self):
         assert config.get("branding", "app_name") == "SecondBrain"
         assert config.get("nonexistent", "key", "fallback") == "fallback"
+
+    def test_reload_when_config_file_changes(self):
+        original_path = config._CONFIG_PATH
+        original_config = config._config
+        original_mtime = config._config_mtime
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                temp_config = Path(tmpdir) / "config.yaml"
+                temp_config.write_text("branding:\n  app_name: First\n", encoding="utf-8")
+
+                config._CONFIG_PATH = temp_config
+                config._config = None
+                config._config_mtime = None
+                assert config.branding()["app_name"] == "First"
+
+                time.sleep(1.1)
+                temp_config.write_text("branding:\n  app_name: Second\n", encoding="utf-8")
+                assert config.branding()["app_name"] == "Second"
+        finally:
+            config._CONFIG_PATH = original_path
+            config._config = original_config
+            config._config_mtime = original_mtime

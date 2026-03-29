@@ -69,6 +69,17 @@ class TestSources:
         assert "alpha" in ws
         assert "beta" in ws
 
+    def test_get_single_source(self):
+        sid = db.log_source("A", "text", None, 1, embedding_model="model-a")
+        src = db.get_source(sid)
+        assert src["title"] == "A"
+        assert src["embedding_model"] == "model-a"
+
+    def test_get_embedding_models(self):
+        db.log_source("A", "text", None, 1, workspace="alpha", embedding_model="model-a")
+        db.log_source("B", "text", None, 1, workspace="alpha", embedding_model="model-b")
+        assert db.get_embedding_models("alpha") == ["model-a", "model-b"]
+
 
 class TestChunks:
     def setup_method(self):
@@ -101,6 +112,18 @@ class TestChunks:
         updated = db.get_chunks_for_source(sid)
         assert updated[0]["text"] == "edited"
 
+    def test_get_single_chunk(self):
+        sid = db.log_source("Test", "text", None, 1)
+        db.log_chunks(sid, ["c1"], ["original"])
+        chunks = db.get_chunks_for_source(sid)
+        chunk = db.get_chunk(chunks[0]["id"])
+        assert chunk["chroma_id"] == "c1"
+
+    def test_get_chunk_preview(self):
+        sid = db.log_source("Test", "text", None, 2)
+        db.log_chunks(sid, ["c1", "c2"], ["first chunk", "second chunk"])
+        assert db.get_chunk_preview_for_source(sid) == "first chunk"
+
 
 class TestSearchHistory:
     def setup_method(self):
@@ -112,18 +135,26 @@ class TestSearchHistory:
         db.DB_PATH = self._orig
 
     def test_log_and_get_history(self):
-        db.log_search("What is RAG?", "RAG stands for...", [{"title": "T"}], ["ml"])
+        db.log_search("What is RAG?", "RAG stands for...", [{"title": "T"}], ["ml"], workspace="work")
         history = db.get_search_history()
         assert len(history) == 1
         assert history[0]["question"] == "What is RAG?"
         assert history[0]["tags_used"] == ["ml"]
+        assert history[0]["workspace"] == "work"
+
+    def test_history_workspace_filter(self):
+        db.log_search("Q1", "A1", [], [], workspace="work")
+        db.log_search("Q2", "A2", [], [], workspace="personal")
+        history = db.get_search_history(workspace="work")
+        assert len(history) == 1
+        assert history[0]["question"] == "Q1"
 
     def test_delete_history(self):
-        db.log_search("Q1", "A1", [], [])
-        db.log_search("Q2", "A2", [], [])
-        count = db.delete_search_history()
-        assert count == 2
-        assert db.get_search_history() == []
+        db.log_search("Q1", "A1", [], [], workspace="work")
+        db.log_search("Q2", "A2", [], [], workspace="personal")
+        count = db.delete_search_history(workspace="work")
+        assert count == 1
+        assert len(db.get_search_history()) == 1
 
 
 class TestStats:
@@ -144,10 +175,69 @@ class TestStats:
     def test_stats_with_data(self):
         sid = db.log_source("A", "url", "http://x", 3, tags=["web"])
         db.log_chunks(sid, ["c1", "c2", "c3"], ["a", "b", "c"])
-        db.log_search("test?", "answer", [], [])
+        db.log_search("test?", "answer", [], [], workspace="default")
         stats = db.get_stats()
         assert stats["source_count"] == 1
         assert stats["chunk_count"] == 3
         assert stats["query_count"] == 1
         assert stats["type_breakdown"]["url"] == 1
         assert stats["tag_frequency"]["web"] == 1
+
+
+class TestApiUsage:
+    def setup_method(self):
+        self._orig = db.DB_PATH
+        db.DB_PATH = Path(_temp_db())
+
+    def teardown_method(self):
+        os.unlink(db.DB_PATH)
+        db.DB_PATH = self._orig
+
+    def test_usage_workspace_filter(self):
+        db.log_api_usage("model-a", "query", 100, 50, 0.01, workspace="work")
+        db.log_api_usage("model-b", "query", 100, 50, 0.02, workspace="personal")
+        usage = db.get_api_usage_stats(workspace="work")
+        assert usage["total_calls"] == 1
+        assert usage["by_model"][0]["model_id"] == "model-a"
+
+
+class TestIngestJobs:
+    def setup_method(self):
+        self._orig = db.DB_PATH
+        db.DB_PATH = Path(_temp_db())
+
+    def teardown_method(self):
+        os.unlink(db.DB_PATH)
+        db.DB_PATH = self._orig
+
+    def test_job_lifecycle(self):
+        job_id = db.create_ingest_job(
+            "text",
+            title="Queued note",
+            payload={"text": "hello world"},
+            workspace="work",
+        )
+        jobs = db.get_ingest_jobs(workspace="work")
+        assert len(jobs) == 1
+        assert jobs[0]["status"] == "pending"
+
+        claimed = db.claim_next_ingest_job()
+        assert claimed is not None
+        assert claimed["id"] == job_id
+        assert claimed["status"] == "running"
+
+        db.complete_ingest_job(job_id, {"chunks": 3})
+        stored = db.get_ingest_job(job_id)
+        assert stored["status"] == "succeeded"
+        assert stored["result"]["chunks"] == 3
+
+    def test_cancel_pending_job(self):
+        job_id = db.create_ingest_job(
+            "url",
+            title="Queued URL",
+            payload={"url": "https://example.com"},
+            workspace="research",
+        )
+        assert db.cancel_ingest_job(job_id) is True
+        job = db.get_ingest_job(job_id)
+        assert job["status"] == "cancelled"

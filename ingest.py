@@ -1,5 +1,6 @@
 """Ingestion pipeline — chunking, embedding, and storage for all content types."""
 
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -17,37 +18,89 @@ import db
 
 CHROMA_PATH = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "secondbrain"
-
-_cfg = config.retrieval()
-CHUNK_SIZE = _cfg.get("chunk_size", 500)
-CHUNK_OVERLAP = _cfg.get("chunk_overlap", 50)
 MIN_CONTENT_LENGTH = 200
 
+logger = logging.getLogger(__name__)
 _models: dict[str, SentenceTransformer] = {}
 _collections: dict[str, chromadb.Collection] = {}
+_client: chromadb.PersistentClient | None = None
+
+
+def _retrieval_setting(key: str, default):
+    return config.retrieval().get(key, default)
+
+
+def _ingestion_setting(key: str, default):
+    return config.ingestion().get(key, default)
+
+
+def _default_embed_model_id() -> str:
+    return config.default_embedding_model()
+
+
+def _normalise_model_id(model_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", model_id).strip("_").lower()
+
+
+def _legacy_collection_name(workspace: str | None = None) -> str:
+    ws = workspace or config.workspaces().get("default", "default")
+    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+
+
+def _get_client() -> chromadb.PersistentClient:
+    global _client
+    if _client is None:
+        _client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return _client
 
 
 def _get_model(model_id: str | None = None) -> SentenceTransformer:
-    model_id = model_id or "all-MiniLM-L6-v2"
+    model_id = model_id or _default_embed_model_id()
     if model_id not in _models:
         _models[model_id] = SentenceTransformer(model_id)
     return _models[model_id]
 
 
-def _collection_name(workspace: str | None = None) -> str:
+def _collection_name(workspace: str | None = None, embed_model_id: str | None = None) -> str:
     ws = workspace or config.workspaces().get("default", "default")
-    return f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+    model = _normalise_model_id(embed_model_id or _default_embed_model_id())
+    base = f"secondbrain_{ws}" if ws != "default" else COLLECTION_NAME
+    return f"{base}_{model}"
 
 
-def _get_collection(workspace: str | None = None) -> chromadb.Collection:
-    name = _collection_name(workspace)
+def _get_collection(
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
+) -> chromadb.Collection:
+    name = _collection_name(workspace, embed_model_id)
     if name not in _collections:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        _collections[name] = client.get_or_create_collection(
-            name=name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        client = _get_client()
+        try:
+            collection = client.get_collection(name=name)
+        except Exception:
+            legacy_name = _legacy_collection_name(workspace)
+            if (embed_model_id or _default_embed_model_id()) == _default_embed_model_id():
+                try:
+                    collection = client.get_collection(name=legacy_name)
+                    _collections[name] = collection
+                    return collection
+                except Exception:
+                    pass
+            collection = client.get_or_create_collection(
+                name=name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        _collections[name] = collection
     return _collections[name]
+
+
+def _batched(items: list, batch_size: int):
+    for idx in range(0, len(items), batch_size):
+        yield idx, items[idx: idx + batch_size]
+
+
+def _serialise_tags(tags: list[str] | None) -> str:
+    return ",".join(tags) if tags else ""
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +143,7 @@ def fetch_url_text(url: str) -> tuple[str, bool]:
 def extract_pdf_text(file_bytes: bytes, ocr: bool = False) -> str:
     """Extract text from a PDF file (bytes). Falls back to OCR if enabled and text is sparse."""
     import io
+
     text_parts = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
@@ -112,8 +166,8 @@ def extract_pdf_text(file_bytes: bytes, ocr: bool = False) -> str:
                     ocr_parts.append(ocr_text.strip())
             if ocr_parts:
                 text = "\n\n".join(ocr_parts)
-        except ImportError:
-            pass  # OCR deps not installed — return what we have
+        except Exception as exc:
+            logger.warning("OCR skipped because dependencies or binaries are unavailable: %s", exc)
     return text
 
 
@@ -198,7 +252,11 @@ def _restore_blocks(chunks: list[str], placeholders: dict[str, str]) -> list[str
     return restored
 
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+def chunk_text(
+    text: str,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
+) -> list[str]:
     """Markdown-aware recursive chunker.
 
     Preserves code blocks and tables as atomic units, then splits on:
@@ -207,6 +265,8 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     3. Sentence boundaries
     4. Words (last resort)
     """
+    chunk_size = chunk_size or _retrieval_setting("chunk_size", 500)
+    overlap = overlap or _retrieval_setting("chunk_overlap", 50)
     protected_text, placeholders = _protect_blocks(text)
     chunks = _recursive_split(protected_text, chunk_size, overlap)
     return _restore_blocks(chunks, placeholders)
@@ -293,26 +353,69 @@ def _embed_and_store(
     embed_model_id: str | None = None,
 ) -> int:
     """Embed chunks and write to ChromaDB + SQLite. Returns source_id."""
-    model = _get_model(embed_model_id)
-    collection = _get_collection(workspace)
-
-    embeddings = model.encode(chunks, show_progress_bar=False).tolist()
+    active_model_id = embed_model_id or _default_embed_model_id()
+    model = _get_model(active_model_id)
+    collection = _get_collection(workspace, active_model_id)
+    batch_size = max(1, int(_ingestion_setting("embedding_batch_size", 64)))
 
     source_id = db.log_source(
         title=title, source_type=source_type, url=url,
         chunk_count=len(chunks), tags=tags,
         workspace=workspace or config.workspaces().get("default", "default"),
+        embedding_model=active_model_id,
     )
-    chroma_ids = [f"{source_id}_{i}_{uuid.uuid4().hex[:8]}" for i in range(len(chunks))]
-    tag_str = ",".join(tags) if tags else ""
-    metadatas = [
-        {"source_id": source_id, "title": title, "url": url or "", "chunk_index": i, "tags": tag_str}
-        for i in range(len(chunks))
-    ]
+    added_ids: list[str] = []
+    tag_str = _serialise_tags(tags)
 
-    collection.add(documents=chunks, embeddings=embeddings, ids=chroma_ids, metadatas=metadatas)
-    db.log_chunks(source_id, chroma_ids, chunks)
+    try:
+        for start_idx, batch_chunks in _batched(chunks, batch_size):
+            batch_embeddings = model.encode(batch_chunks, show_progress_bar=False).tolist()
+            batch_ids = [
+                f"{source_id}_{start_idx + offset}_{uuid.uuid4().hex[:8]}"
+                for offset in range(len(batch_chunks))
+            ]
+            batch_metadatas = [
+                {
+                    "source_id": source_id,
+                    "title": title,
+                    "url": url or "",
+                    "chunk_index": start_idx + offset,
+                    "tags": tag_str,
+                }
+                for offset in range(len(batch_chunks))
+            ]
+
+            collection.add(
+                documents=batch_chunks,
+                embeddings=batch_embeddings,
+                ids=batch_ids,
+                metadatas=batch_metadatas,
+            )
+            added_ids.extend(batch_ids)
+            db.log_chunks(source_id, batch_ids, batch_chunks)
+    except Exception:
+        if added_ids:
+            collection.delete(ids=added_ids)
+        db.delete_source(source_id)
+        raise
+
+    logger.info(
+        "Stored source '%s' as %s chunks in workspace=%s model=%s",
+        title,
+        len(chunks),
+        workspace or config.workspaces().get("default", "default"),
+        active_model_id,
+    )
     return source_id
+
+
+def _ensure_chunk_limit(title: str, chunks: list[str]) -> None:
+    max_chunks = int(_ingestion_setting("max_source_chunks", 2000))
+    if len(chunks) > max_chunks:
+        raise ValueError(
+            f'"{title}" expands to {len(chunks)} chunks, which exceeds the configured limit of '
+            f"{max_chunks}. Split the document or increase ingestion.max_source_chunks."
+        )
 
 
 def ingest_text(
@@ -328,6 +431,7 @@ def ingest_text(
     chunks = chunk_text(text)
     if not chunks:
         return 0
+    _ensure_chunk_limit(title, chunks)
     _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id)
     return len(chunks)
 
@@ -373,6 +477,21 @@ def ingest_docx(
                        workspace=workspace, embed_model_id=embed_model_id)
 
 
+def extract_file_text(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    ocr: bool = False,
+) -> tuple[str, str]:
+    """Extract text from a supported file and return (text, source_type)."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        return extract_pdf_text(file_bytes, ocr=ocr), "pdf"
+    if ext == "docx":
+        return extract_docx_text(file_bytes), "docx"
+    return file_bytes.decode("utf-8", errors="replace"), "file"
+
+
 def ingest_file(
     file_bytes: bytes,
     filename: str,
@@ -383,17 +502,9 @@ def ingest_file(
     ocr: bool = False,
 ) -> int:
     """Ingest a file based on its extension. Returns chunk count."""
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext == "pdf":
-        return ingest_pdf(file_bytes, title=title, tags=tags, workspace=workspace,
-                          embed_model_id=embed_model_id, ocr=ocr)
-    elif ext == "docx":
-        return ingest_docx(file_bytes, title=title, tags=tags, workspace=workspace,
-                           embed_model_id=embed_model_id)
-    else:
-        text = file_bytes.decode("utf-8", errors="replace")
-        return ingest_text(text, title=title, source_type="file", tags=tags,
-                           workspace=workspace, embed_model_id=embed_model_id)
+    text, source_type = extract_file_text(file_bytes, filename, ocr=ocr)
+    return ingest_text(text, title=title, source_type=source_type, tags=tags,
+                       workspace=workspace, embed_model_id=embed_model_id)
 
 
 def ingest_youtube(
@@ -508,11 +619,73 @@ def ingest_rss_feed(feed_id: int) -> dict:
 
 def delete_source(source_id: int, workspace: str | None = None) -> None:
     """Delete a source and all its vectors from ChromaDB and SQLite."""
-    collection = _get_collection(workspace)
+    source = db.get_source(source_id)
+    if source is None:
+        return
+    collection = _get_collection(
+        source.get("workspace") or workspace,
+        source.get("embedding_model"),
+    )
     chroma_ids = db.get_chroma_ids_for_source(source_id)
     if chroma_ids:
         collection.delete(ids=chroma_ids)
     db.delete_source(source_id)
+
+
+def update_source_tags(source_id: int, tags: list[str]) -> None:
+    """Update a source's tags in both SQLite and Chroma metadata."""
+    source = db.get_source(source_id)
+    if source is None:
+        raise ValueError(f"Source {source_id} not found")
+
+    chunk_rows = db.get_chunks_for_source(source_id)
+    if chunk_rows:
+        collection = _get_collection(source.get("workspace"), source.get("embedding_model"))
+        tag_str = _serialise_tags(tags)
+        collection.update(
+            ids=[row["chroma_id"] for row in chunk_rows],
+            metadatas=[
+                {
+                    "source_id": source_id,
+                    "title": source["title"],
+                    "url": source.get("url") or "",
+                    "chunk_index": row["chunk_index"],
+                    "tags": tag_str,
+                }
+                for row in chunk_rows
+            ],
+        )
+
+    db.update_source_tags(source_id, tags)
+
+
+def update_chunk_text(chunk_id: int, new_text: str) -> None:
+    """Update a chunk in SQLite and re-embed it in Chroma."""
+    chunk = db.get_chunk(chunk_id)
+    if chunk is None:
+        raise ValueError(f"Chunk {chunk_id} not found")
+
+    source = db.get_source(chunk["source_id"])
+    if source is None:
+        raise ValueError(f"Source {chunk['source_id']} not found")
+
+    model_id = source.get("embedding_model") or _default_embed_model_id()
+    collection = _get_collection(source.get("workspace"), model_id)
+    embedding = _get_model(model_id).encode([new_text], show_progress_bar=False).tolist()[0]
+
+    collection.update(
+        ids=[chunk["chroma_id"]],
+        documents=[new_text],
+        embeddings=[embedding],
+        metadatas=[{
+            "source_id": source["id"],
+            "title": source["title"],
+            "url": source.get("url") or "",
+            "chunk_index": chunk["chunk_index"],
+            "tags": _serialise_tags(source.get("tags")),
+        }],
+    )
+    db.update_chunk_text(chunk_id, new_text)
 
 
 def export_knowledge_base(workspace: str | None = None) -> dict:
@@ -532,6 +705,7 @@ def export_knowledge_base(workspace: str | None = None) -> dict:
             "source_type": src["source_type"],
             "url": src.get("url"),
             "tags": src.get("tags", []),
+            "embedding_model": src.get("embedding_model") or _default_embed_model_id(),
             "ingested_at": src["ingested_at"],
             "chunks": [{"text": c["text"], "chunk_index": c["chunk_index"]} for c in chunks],
         })
@@ -562,6 +736,7 @@ def import_knowledge_base(data: dict, workspace: str | None = None) -> dict:
             url=src.get("url"),
             tags=src.get("tags"),
             workspace=ws,
+            embed_model_id=src.get("embedding_model"),
         )
         imported += 1
 
@@ -572,41 +747,48 @@ def find_duplicate_chunks(threshold: float | None = None, workspace: str | None 
     """Find near-duplicate chunks using cosine similarity. Returns pairs above threshold."""
     if threshold is None:
         threshold = config.retrieval().get("dedup_threshold", 0.95)
-    collection = _get_collection(workspace)
-    total = collection.count()
-    if total < 2:
-        return []
-
-    limit = min(total, 500)
-    all_data = collection.get(limit=limit, include=["documents", "metadatas", "embeddings"])
-
-    if not all_data["embeddings"]:
-        return []
-
-    import numpy as np
-    embeddings = np.array(all_data["embeddings"])
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    normed = embeddings / norms
-    sim_matrix = normed @ normed.T
-
     duplicates = []
-    seen = set()
-    for i in range(len(sim_matrix)):
-        for j in range(i + 1, len(sim_matrix)):
-            if sim_matrix[i][j] >= threshold:
-                pair_key = (all_data["ids"][i], all_data["ids"][j])
-                if pair_key not in seen:
-                    seen.add(pair_key)
-                    duplicates.append({
-                        "chunk_a_id": all_data["ids"][i],
-                        "chunk_b_id": all_data["ids"][j],
-                        "title_a": all_data["metadatas"][i].get("title", "Unknown"),
-                        "title_b": all_data["metadatas"][j].get("title", "Unknown"),
-                        "similarity": round(float(sim_matrix[i][j]), 4),
-                        "text_a": all_data["documents"][i][:200],
-                        "text_b": all_data["documents"][j][:200],
-                    })
+    embed_models = db.get_embedding_models(workspace=workspace)
+    if not embed_models:
+        embed_models = [_default_embed_model_id()]
+
+    for model_id in embed_models:
+        collection = _get_collection(workspace, model_id)
+        total = collection.count()
+        if total < 2:
+            continue
+
+        limit = min(total, 500)
+        all_data = collection.get(limit=limit, include=["documents", "metadatas", "embeddings"])
+        if not all_data["embeddings"]:
+            continue
+
+        import numpy as np
+
+        embeddings = np.array(all_data["embeddings"])
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        normed = embeddings / norms
+        sim_matrix = normed @ normed.T
+
+        seen = set()
+        for i in range(len(sim_matrix)):
+            for j in range(i + 1, len(sim_matrix)):
+                if sim_matrix[i][j] >= threshold:
+                    pair_key = (all_data["ids"][i], all_data["ids"][j])
+                    if pair_key not in seen:
+                        seen.add(pair_key)
+                        duplicates.append({
+                            "chunk_a_id": all_data["ids"][i],
+                            "chunk_b_id": all_data["ids"][j],
+                            "title_a": all_data["metadatas"][i].get("title", "Unknown"),
+                            "title_b": all_data["metadatas"][j].get("title", "Unknown"),
+                            "similarity": round(float(sim_matrix[i][j]), 4),
+                            "text_a": all_data["documents"][i][:200],
+                            "text_b": all_data["documents"][j][:200],
+                            "embedding_model": model_id,
+                        })
+
     return sorted(duplicates, key=lambda x: x["similarity"], reverse=True)[:50]
 
 
@@ -656,11 +838,15 @@ def recrawl_source(source_id: int, workspace: str | None = None) -> dict:
     if not freshness["changed"]:
         return {"changed": False, "chunks": 0, "error": None}
 
-    # Delete old and re-ingest
-    delete_source(source_id, workspace=workspace)
     try:
-        count, _ = ingest_url(src["url"], title=src["title"], tags=src.get("tags"),
-                              workspace=workspace)
+        count, _ = ingest_url(
+            src["url"],
+            title=src["title"],
+            tags=src.get("tags"),
+            workspace=workspace,
+            embed_model_id=src.get("embedding_model"),
+        )
+        delete_source(source_id, workspace=workspace)
         return {"changed": True, "chunks": count, "error": None}
     except Exception as e:
         return {"changed": True, "chunks": 0, "error": str(e)}
@@ -677,31 +863,52 @@ def reingest_source(source_id: int, workspace: str | None = None,
     if not chunks_rows:
         return 0
 
-    sources = [s for s in db.get_all_sources() if s["id"] == source_id]
-    if not sources:
+    source = db.get_source(source_id)
+    if not source:
         return 0
-    src = sources[0]
 
-    collection = _get_collection(workspace)
+    old_model_id = source.get("embedding_model") or _default_embed_model_id()
+    target_model_id = embed_model_id or old_model_id
+    active_workspace = workspace or source.get("workspace")
+    old_collection = _get_collection(active_workspace, old_model_id)
+    new_collection = _get_collection(active_workspace, target_model_id)
     old_ids = [r["chroma_id"] for r in chunks_rows]
-    collection.delete(ids=old_ids)
 
     texts = [r["text"] for r in chunks_rows]
-    model = _get_model(embed_model_id)
-    embeddings = model.encode(texts, show_progress_bar=False).tolist()
-    new_ids = [f"{source_id}_{i}_{uuid.uuid4().hex[:8]}" for i in range(len(texts))]
-    tag_str = ",".join(src.get("tags") or [])
-    metadatas = [
-        {
-            "source_id": source_id,
-            "title": src["title"],
-            "url": src.get("url") or "",
-            "chunk_index": i,
-            "tags": tag_str,
-        }
-        for i in range(len(texts))
-    ]
-    collection.add(documents=texts, embeddings=embeddings, ids=new_ids, metadatas=metadatas)
+    model = _get_model(target_model_id)
+    batch_size = max(1, int(_ingestion_setting("embedding_batch_size", 64)))
+    tag_str = _serialise_tags(source.get("tags"))
+    new_ids: list[str] = []
+
+    try:
+        for start_idx, batch_texts in _batched(texts, batch_size):
+            batch_embeddings = model.encode(batch_texts, show_progress_bar=False).tolist()
+            batch_ids = [
+                f"{source_id}_{start_idx + offset}_{uuid.uuid4().hex[:8]}"
+                for offset in range(len(batch_texts))
+            ]
+            new_collection.add(
+                documents=batch_texts,
+                embeddings=batch_embeddings,
+                ids=batch_ids,
+                metadatas=[
+                    {
+                        "source_id": source_id,
+                        "title": source["title"],
+                        "url": source.get("url") or "",
+                        "chunk_index": start_idx + offset,
+                        "tags": tag_str,
+                    }
+                    for offset in range(len(batch_texts))
+                ],
+            )
+            new_ids.extend(batch_ids)
+    except Exception:
+        if new_ids:
+            new_collection.delete(ids=new_ids)
+        raise
+
+    old_collection.delete(ids=old_ids)
 
     # Update stored chroma IDs in SQLite
     conn_rows = db.get_chunks_for_source(source_id)
@@ -711,5 +918,6 @@ def reingest_source(source_id: int, workspace: str | None = None,
         conn.execute("UPDATE chunks SET chroma_id = ? WHERE id = ?", (new_id, old_row["id"]))
     conn.commit()
     conn.close()
+    db.update_source_embedding_model(source_id, target_model_id)
 
     return len(texts)
