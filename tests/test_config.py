@@ -47,6 +47,11 @@ class TestConfigLoader:
         assert ws["default"] == "default"
         assert len(ws["predefined"]) >= 1
 
+    def test_jobs_defaults(self):
+        jobs_cfg = config.jobs()
+        assert jobs_cfg["embedded_worker"] is True
+        assert jobs_cfg["lease_seconds"] >= 300
+
     def test_ui_section(self):
         ask_ui = config.ui("ask")
         assert "heading" in ask_ui

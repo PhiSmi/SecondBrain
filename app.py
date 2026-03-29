@@ -432,8 +432,10 @@ def _job_summary(job: dict) -> str:
     if status == "running":
         started_at = _format_timestamp(job.get("started_at"))
         return f"Running since {started_at}."
+    if status == "cancelling":
+        return "Cancellation requested. The worker will stop at the next safe checkpoint."
     if status == "cancelled":
-        return "Cancelled before processing started."
+        return "Cancelled."
     if status == "failed":
         return job.get("error") or "Job failed."
     if job.get("job_type") == "bulk_urls":
@@ -441,6 +443,18 @@ def _job_summary(job: dict) -> str:
     if "chunks" in result:
         return f"Stored {result['chunks']} chunks."
     return "Completed."
+
+
+def _job_progress(job: dict) -> tuple[float, str] | None:
+    total = int(job.get("progress_total") or 0)
+    if total <= 0:
+        return None
+    current = int(job.get("progress_current") or 0)
+    if job.get("status") in {"succeeded", "cancelled"}:
+        current = total
+    ratio = min(max(current / total, 0.0), 1.0)
+    message = job.get("progress_message") or _job_summary(job)
+    return ratio, f"{current}/{total} • {message}"
 
 # ---------------------------------------------------------------------------
 # Sidebar — workspace + settings
@@ -807,8 +821,13 @@ with tab_ingest:
     jobs_header_col, jobs_refresh_col = st.columns([4, 1])
     with jobs_header_col:
         st.subheader(_ingest_cfg.get("jobs_heading", "Background Jobs"))
-        worker_state = "online" if background_jobs.worker_is_running() else "starting"
-        st.caption(f"Worker status: {worker_state}. Background jobs keep running across reruns.")
+        worker_state = background_jobs.embedded_worker_status()
+        if worker_state == "disabled":
+            st.caption("Embedded worker disabled. Run `python worker.py` or use the Docker worker service.")
+        elif worker_state == "online":
+            st.caption("Embedded worker online. Jobs can also be picked up by standalone workers.")
+        else:
+            st.caption("Embedded worker starting.")
     with jobs_refresh_col:
         st.button("Refresh", key="refresh_background_jobs", use_container_width=True)
 
@@ -817,14 +836,14 @@ with tab_ingest:
         st.info(_ingest_cfg.get("jobs_empty_message", "No ingestion jobs yet."))
     else:
         pending_jobs = sum(1 for job in jobs if job["status"] == "pending")
-        running_jobs = sum(1 for job in jobs if job["status"] == "running")
+        active_jobs = sum(1 for job in jobs if job["status"] in {"running", "cancelling"})
         failed_jobs = sum(1 for job in jobs if job["status"] == "failed")
-        completed_jobs = sum(1 for job in jobs if job["status"] == "succeeded")
+        completed_jobs = sum(1 for job in jobs if job["status"] in {"succeeded", "cancelled"})
         job_col1, job_col2, job_col3, job_col4 = st.columns(4)
         with job_col1:
             _render_metric_card(pending_jobs, "Pending", kicker="Jobs")
         with job_col2:
-            _render_metric_card(running_jobs, "Running", kicker="Jobs")
+            _render_metric_card(active_jobs, "Active", kicker="Jobs")
         with job_col3:
             _render_metric_card(completed_jobs, "Completed", kicker="Jobs")
         with job_col4:
@@ -854,10 +873,21 @@ with tab_ingest:
                             else ""
                         )
                     )
+                    st.caption(
+                        f"Attempts: {job.get('attempt_count', 0)}"
+                        + (
+                            f" • Last heartbeat {_format_timestamp(job.get('heartbeat_at'))}"
+                            if job.get("heartbeat_at")
+                            else ""
+                        )
+                    )
+                    progress = _job_progress(job)
+                    if progress is not None:
+                        st.progress(progress[0], text=progress[1])
                     summary = _job_summary(job)
                     if job["status"] == "failed":
                         st.error(summary)
-                    elif job["status"] == "cancelled":
+                    elif job["status"] in {"cancelled", "cancelling"}:
                         st.warning(summary)
                     elif job["status"] == "succeeded":
                         st.success(summary)
@@ -874,13 +904,17 @@ with tab_ingest:
                                 else:
                                     st.write(f"{item['url']} — {item.get('chunks', 0)} chunks")
                 with action_col:
-                    if job["status"] == "pending" and st.button(
-                        "Cancel",
+                    if job["status"] in {"pending", "running"} and st.button(
+                        "Cancel" if job["status"] == "pending" else "Stop",
                         key=f"cancel_job_{job['id']}",
                         use_container_width=True,
                     ):
-                        if background_jobs.cancel_job(job["id"]):
+                        cancel_status = background_jobs.cancel_job(job["id"])
+                        if cancel_status == "cancelled":
                             st.success(f"Cancelled job #{job['id']}.")
+                            st.rerun()
+                        if cancel_status == "cancelling":
+                            st.warning(f"Cancellation requested for job #{job['id']}.")
                             st.rerun()
                         st.warning(f"Job #{job['id']} could not be cancelled.")
 

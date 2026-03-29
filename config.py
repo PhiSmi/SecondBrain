@@ -57,6 +57,10 @@ def ingestion() -> dict:
     return _load().get("ingestion", {})
 
 
+def jobs() -> dict:
+    return _load().get("jobs", {})
+
+
 def workspaces() -> dict:
     return _load().get("workspaces", {})
 

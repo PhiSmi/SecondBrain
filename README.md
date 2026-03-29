@@ -63,6 +63,7 @@ The result is a searchable memory layer for content already collected:
 - Separate workspaces
 - Per-source embedding model tracking
 - Background ingestion jobs with persisted status
+- Standalone worker support for durable queued ingestion
 - Workspace-aware history
 - Workspace-aware API usage analytics
 - Duplicate chunk scanning
@@ -77,6 +78,8 @@ The FastAPI app exposes a programmatic surface for the core workflow:
 - `POST /ingest/url`
 - `POST /jobs/ingest/text`
 - `POST /jobs/ingest/url`
+- `POST /jobs/ingest/youtube`
+- `POST /jobs/ingest/bulk-urls`
 - `GET /jobs`
 - `GET /jobs/{job_id}`
 - `POST /jobs/{job_id}/cancel`
@@ -252,6 +255,11 @@ The repository includes a `Dockerfile` and `docker-compose.yml`.
 docker-compose up -d
 ```
 
+The compose stack runs:
+
+- `secondbrain` for the Streamlit UI
+- `secondbrain-worker` for durable queued ingestion
+
 Docker is the better choice when:
 
 - OCR needs to be available consistently
@@ -288,6 +296,7 @@ APP_PASSWORD = "..." # optional
 - Large documents are better handled locally or via Docker.
 - OCR requires both the Python and system dependencies.
 - Community Cloud is suitable for moderate knowledge bases, not heavy document-processing workloads.
+- Streamlit Cloud uses the embedded worker because it cannot run the separate Docker worker service.
 
 ## Configuration
 
@@ -301,6 +310,7 @@ All product behavior is centralized in `config.yaml`.
 - `models`: LLM and embedding model options
 - `retrieval`: chunking and retrieval defaults
 - `ingestion`: upload and chunk limits
+- `jobs`: worker mode, poll interval, and lease duration
 - `workspaces`: predefined workspaces
 - `recrawl`: URL re-crawl defaults
 
@@ -340,6 +350,14 @@ Imports can be queued into a persisted background worker instead of running inli
 
 That means large URL batches, transcript pulls, and heavier file ingests no longer have to keep the UI blocked while retrieval storage is being updated.
 
+Each job stores:
+
+- progress counters and a status message
+- worker heartbeat and lease data
+- attempt count so stale jobs can be reclaimed after worker failure
+
+In Docker, queued ingestion is intended to be handled by the dedicated `secondbrain-worker` service. In Streamlit-only deployments, the embedded worker remains available for convenience.
+
 ## API Reference
 
 ### `POST /ask`
@@ -376,6 +394,14 @@ Queue raw text ingestion and return a job id immediately.
 
 Queue URL ingestion and return a job id immediately.
 
+### `POST /jobs/ingest/youtube`
+
+Queue transcript ingestion for a YouTube URL.
+
+### `POST /jobs/ingest/bulk-urls`
+
+Queue a batch of URLs for ingestion.
+
 ### `GET /jobs`
 
 List recent background ingestion jobs.
@@ -386,7 +412,7 @@ Return one background ingestion job.
 
 ### `POST /jobs/{job_id}/cancel`
 
-Cancel a pending background ingestion job.
+Cancel a pending job immediately or request cancellation for a running job.
 
 ### `POST /suggest-tags`
 
@@ -419,6 +445,7 @@ Basic health check endpoint.
 - `ingest.py` — extraction, chunking, embedding, storage, and maintenance operations
 - `query.py` — retrieval, reranking, generation, summaries, and tagging
 - `evaluate.py` — evaluation workflow
+- `worker.py` — standalone durable queue worker
 - `tests/` — unit tests
 - `packages.txt` — system packages for Streamlit Cloud OCR support
 
@@ -442,7 +469,7 @@ That keeps setup simple, but it also means:
 
 - Streamlit remains the main UX layer
 - Chroma runs embedded in-process
-- background jobs run in-process rather than through an external queue
+- queued ingestion is durable in Docker, but still lightweight compared with a full distributed job system
 - very heavy imports are still better suited to Docker or a dedicated service host
 
 For personal libraries and small-team knowledge bases, that tradeoff is usually the right one. For heavier pipelines, the natural next steps are external workers, job queues, stricter end-to-end integration tests, and a richer API surface.

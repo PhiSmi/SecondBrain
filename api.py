@@ -60,6 +60,23 @@ class IngestURLRequest(BaseModel):
     auto_tag: bool = False
 
 
+class IngestYouTubeRequest(BaseModel):
+    url: str
+    title: str | None = None
+    tags: list[str] | None = None
+    workspace: str | None = None
+    embed_model_id: str | None = None
+    auto_tag: bool = False
+
+
+class IngestBulkURLsRequest(BaseModel):
+    urls: list[str]
+    tags: list[str] | None = None
+    workspace: str | None = None
+    embed_model_id: str | None = None
+    auto_tag: bool = False
+
+
 class IngestResponse(BaseModel):
     chunks: int
 
@@ -152,6 +169,31 @@ def api_queue_ingest_url(req: IngestURLRequest):
     return JobQueuedResponse(job_id=job_id, status="pending")
 
 
+@app.post("/jobs/ingest/youtube", response_model=JobQueuedResponse)
+def api_queue_ingest_youtube(req: IngestYouTubeRequest):
+    job_id = background_jobs.queue_youtube_ingest(
+        req.url,
+        title=req.title,
+        tags=req.tags,
+        workspace=req.workspace or "default",
+        embed_model_id=req.embed_model_id,
+        auto_tag=req.auto_tag,
+    )
+    return JobQueuedResponse(job_id=job_id, status="pending")
+
+
+@app.post("/jobs/ingest/bulk-urls", response_model=JobQueuedResponse)
+def api_queue_ingest_bulk_urls(req: IngestBulkURLsRequest):
+    job_id = background_jobs.queue_bulk_url_ingest(
+        req.urls,
+        tags=req.tags,
+        workspace=req.workspace or "default",
+        embed_model_id=req.embed_model_id,
+        auto_tag=req.auto_tag,
+    )
+    return JobQueuedResponse(job_id=job_id, status="pending")
+
+
 @app.post("/suggest-tags", response_model=TagSuggestResponse)
 def api_suggest_tags(req: TagSuggestRequest):
     """Suggest tags for a piece of content using Claude."""
@@ -186,14 +228,12 @@ def api_usage(workspace: str | None = None):
 
 @app.get("/jobs")
 def api_jobs(workspace: str | None = None, limit: int = 25):
-    background_jobs.ensure_worker_running()
-    return db.get_ingest_jobs(limit=limit, workspace=workspace)
+    return background_jobs.list_jobs(limit=limit, workspace=workspace)
 
 
 @app.get("/jobs/{job_id}")
 def api_job(job_id: int):
-    background_jobs.ensure_worker_running()
-    job = db.get_ingest_job(job_id)
+    job = background_jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
@@ -201,10 +241,10 @@ def api_job(job_id: int):
 
 @app.post("/jobs/{job_id}/cancel")
 def api_cancel_job(job_id: int):
-    cancelled = background_jobs.cancel_job(job_id)
-    if not cancelled:
+    status = background_jobs.cancel_job(job_id)
+    if status is None:
         raise HTTPException(status_code=409, detail="Job could not be cancelled")
-    return {"cancelled": True}
+    return {"cancelled": True, "status": status}
 
 
 @app.get("/health")

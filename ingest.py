@@ -353,6 +353,7 @@ def _embed_and_store(
     tags: list[str] | None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Embed chunks and write to ChromaDB + SQLite. Returns source_id."""
     active_model_id = embed_model_id or _default_embed_model_id()
@@ -365,6 +366,7 @@ def _embed_and_store(
         chunk_count=len(chunks), tags=tags,
         workspace=workspace or config.workspaces().get("default", "default"),
         embedding_model=active_model_id,
+        ingest_job_id=ingest_job_id,
     )
     added_ids: list[str] = []
     tag_str = _serialise_tags(tags)
@@ -428,13 +430,14 @@ def ingest_text(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Chunk, embed and store raw text. Returns chunk count."""
     chunks = chunk_text(text)
     if not chunks:
         return 0
     _ensure_chunk_limit(title, chunks)
-    _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id)
+    _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id, ingest_job_id)
     return len(chunks)
 
 
@@ -444,11 +447,13 @@ def ingest_url(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ingest_job_id: int | None = None,
 ) -> tuple[int, bool]:
     """Fetch a URL, extract text and ingest it. Returns (chunk_count, js_warning)."""
     text, js_warning = fetch_url_text(url)
     chunk_count = ingest_text(text, title=title or url, source_type="url", url=url, tags=tags,
-                              workspace=workspace, embed_model_id=embed_model_id)
+                              workspace=workspace, embed_model_id=embed_model_id,
+                              ingest_job_id=ingest_job_id)
     return chunk_count, js_warning
 
 
@@ -459,11 +464,13 @@ def ingest_pdf(
     workspace: str | None = None,
     embed_model_id: str | None = None,
     ocr: bool = False,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Extract text from a PDF and ingest it. Returns chunk count."""
     text = extract_pdf_text(file_bytes, ocr=ocr)
     return ingest_text(text, title=title, source_type="pdf", tags=tags,
-                       workspace=workspace, embed_model_id=embed_model_id)
+                       workspace=workspace, embed_model_id=embed_model_id,
+                       ingest_job_id=ingest_job_id)
 
 
 def ingest_docx(
@@ -472,11 +479,13 @@ def ingest_docx(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Extract text from a DOCX and ingest it. Returns chunk count."""
     text = extract_docx_text(file_bytes)
     return ingest_text(text, title=title, source_type="docx", tags=tags,
-                       workspace=workspace, embed_model_id=embed_model_id)
+                       workspace=workspace, embed_model_id=embed_model_id,
+                       ingest_job_id=ingest_job_id)
 
 
 def extract_file_text(
@@ -502,11 +511,13 @@ def ingest_file(
     workspace: str | None = None,
     embed_model_id: str | None = None,
     ocr: bool = False,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Ingest a file based on its extension. Returns chunk count."""
     text, source_type = extract_file_text(file_bytes, filename, ocr=ocr)
     return ingest_text(text, title=title, source_type=source_type, tags=tags,
-                       workspace=workspace, embed_model_id=embed_model_id)
+                       workspace=workspace, embed_model_id=embed_model_id,
+                       ingest_job_id=ingest_job_id)
 
 
 def ingest_youtube(
@@ -515,11 +526,13 @@ def ingest_youtube(
     tags: list[str] | None = None,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Fetch a YouTube transcript and ingest it. Returns chunk count."""
     text = fetch_youtube_transcript(url)
     return ingest_text(text, title=title or url, source_type="youtube", url=url, tags=tags,
-                       workspace=workspace, embed_model_id=embed_model_id)
+                       workspace=workspace, embed_model_id=embed_model_id,
+                       ingest_job_id=ingest_job_id)
 
 
 def ingest_bulk_urls(

@@ -11,6 +11,20 @@ services:
       - ./config.yaml:/app/config.yaml  # mount config for live editing
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SECOND_BRAIN_EMBEDDED_WORKER=0
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  secondbrain-worker:
+    build: .
+    container_name: secondbrain-worker
+    command: ["python", "worker.py"]
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     env_file:
       - .env
     restart: unless-stopped

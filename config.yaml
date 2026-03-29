@@ -162,6 +162,14 @@ ingestion:
   embedding_batch_size: 64           # batch size for vector writes to reduce peak memory
 
 # ---------------------------------------------------------------------------
+# Background Jobs
+# ---------------------------------------------------------------------------
+jobs:
+  embedded_worker: true              # convenient for Streamlit/local single-process use
+  poll_interval_seconds: 1.5         # how often workers check for queued work
+  lease_seconds: 1800                # stale-job recovery window for worker crashes
+
+# ---------------------------------------------------------------------------
 # Workspaces (Multi-collection support)
 # ---------------------------------------------------------------------------
 workspaces:

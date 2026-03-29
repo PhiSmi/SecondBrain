@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -216,20 +217,34 @@ class TestIngestJobs:
             title="Queued note",
             payload={"text": "hello world"},
             workspace="work",
+            progress_total=4,
+            progress_message="Queued",
         )
         jobs = db.get_ingest_jobs(workspace="work")
         assert len(jobs) == 1
         assert jobs[0]["status"] == "pending"
+        assert jobs[0]["progress_total"] == 4
 
-        claimed = db.claim_next_ingest_job()
+        claimed = db.claim_next_ingest_job("worker-a", lease_seconds=300)
         assert claimed is not None
         assert claimed["id"] == job_id
         assert claimed["status"] == "running"
+        assert claimed["worker_id"] == "worker-a"
+
+        updated = db.update_ingest_job_progress(
+            job_id,
+            "worker-a",
+            2,
+            progress_message="Embedding",
+            lease_seconds=300,
+        )
+        assert updated is True
 
         db.complete_ingest_job(job_id, {"chunks": 3})
         stored = db.get_ingest_job(job_id)
         assert stored["status"] == "succeeded"
         assert stored["result"]["chunks"] == 3
+        assert stored["progress_current"] == 4
 
     def test_cancel_pending_job(self):
         job_id = db.create_ingest_job(
@@ -238,6 +253,47 @@ class TestIngestJobs:
             payload={"url": "https://example.com"},
             workspace="research",
         )
-        assert db.cancel_ingest_job(job_id) is True
+        assert db.cancel_ingest_job(job_id) == "cancelled"
+        job = db.get_ingest_job(job_id)
+        assert job["status"] == "cancelled"
+
+    def test_reclaim_stale_running_job(self):
+        job_id = db.create_ingest_job(
+            "text",
+            title="Retry me",
+            payload={"text": "hello"},
+            workspace="default",
+        )
+        claimed = db.claim_next_ingest_job("worker-a", lease_seconds=300)
+        assert claimed is not None
+        conn = db._get_conn()
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        conn.execute(
+            """UPDATE ingest_jobs
+               SET lease_expires_at = ?, heartbeat_at = ?, status = 'running'
+               WHERE id = ?""",
+            (stale, stale, job_id),
+        )
+        conn.commit()
+        conn.close()
+
+        reclaimed = db.claim_next_ingest_job("worker-b", lease_seconds=300)
+        assert reclaimed is not None
+        assert reclaimed["id"] == job_id
+        assert reclaimed["worker_id"] == "worker-b"
+        assert reclaimed["attempt_count"] == 2
+
+    def test_cancel_running_job_marks_cancelling(self):
+        job_id = db.create_ingest_job(
+            "text",
+            title="Stop me",
+            payload={"text": "hello"},
+            workspace="default",
+        )
+        claimed = db.claim_next_ingest_job("worker-a", lease_seconds=300)
+        assert claimed is not None
+        assert db.cancel_ingest_job(job_id) == "cancelling"
+        assert db.is_ingest_job_cancelling(job_id, "worker-a") is True
+        db.mark_ingest_job_cancelled(job_id, "worker-a")
         job = db.get_ingest_job(job_id)
         assert job["status"] == "cancelled"

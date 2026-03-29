@@ -9,6 +9,10 @@ DB_PATH = Path(__file__).parent / "data" / "metadata.db"
 DEFAULT_EMBED_MODEL = "all-MiniLM-L6-v2"
 
 
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     try:
         conn.execute(f"SELECT {column} FROM {table} LIMIT 1")
@@ -50,8 +54,13 @@ def _get_conn() -> sqlite3.Connection:
             tags        TEXT    NOT NULL DEFAULT '[]',
             workspace   TEXT    NOT NULL DEFAULT 'default',
             embedding_model TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2',
+            ingest_job_id INTEGER,
             ingested_at TEXT    NOT NULL
         );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_ingest_job
+            ON sources(ingest_job_id)
+            WHERE ingest_job_id IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS chunks (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,6 +123,13 @@ def _get_conn() -> sqlite3.Connection:
             status      TEXT    NOT NULL DEFAULT 'pending',
             result      TEXT    NOT NULL DEFAULT '{}',
             error       TEXT,
+            progress_current INTEGER NOT NULL DEFAULT 0,
+            progress_total   INTEGER NOT NULL DEFAULT 0,
+            progress_message TEXT,
+            worker_id    TEXT,
+            heartbeat_at TEXT,
+            lease_expires_at TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT    NOT NULL,
             started_at  TEXT,
             finished_at TEXT
@@ -125,8 +141,20 @@ def _get_conn() -> sqlite3.Connection:
     )
     _ensure_column(conn, "sources", "workspace", "TEXT NOT NULL DEFAULT 'default'")
     _ensure_column(conn, "sources", "embedding_model", f"TEXT NOT NULL DEFAULT '{DEFAULT_EMBED_MODEL}'")
+    _ensure_column(conn, "sources", "ingest_job_id", "INTEGER")
     _ensure_column(conn, "search_history", "workspace", "TEXT NOT NULL DEFAULT 'default'")
     _ensure_column(conn, "api_usage", "workspace", "TEXT NOT NULL DEFAULT 'default'")
+    _ensure_column(conn, "ingest_jobs", "progress_current", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "ingest_jobs", "progress_total", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "ingest_jobs", "progress_message", "TEXT")
+    _ensure_column(conn, "ingest_jobs", "worker_id", "TEXT")
+    _ensure_column(conn, "ingest_jobs", "heartbeat_at", "TEXT")
+    _ensure_column(conn, "ingest_jobs", "lease_expires_at", "TEXT")
+    _ensure_column(conn, "ingest_jobs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_ingest_job ON sources(ingest_job_id) "
+        "WHERE ingest_job_id IS NOT NULL"
+    )
     conn.commit()
     return conn
 
@@ -143,12 +171,14 @@ def log_source(
     tags: list[str] | None = None,
     workspace: str = "default",
     embedding_model: str = DEFAULT_EMBED_MODEL,
+    ingest_job_id: int | None = None,
 ) -> int:
     """Record a newly ingested source. Returns the source id."""
     conn = _get_conn()
     cur = conn.execute(
-        """INSERT INTO sources (title, source_type, url, chunk_count, tags, workspace, embedding_model, ingested_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO sources
+           (title, source_type, url, chunk_count, tags, workspace, embedding_model, ingest_job_id, ingested_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             title,
             source_type,
@@ -157,7 +187,8 @@ def log_source(
             json.dumps(tags or []),
             workspace,
             embedding_model,
-            datetime.now(timezone.utc).isoformat(),
+            ingest_job_id,
+            _utcnow(),
         ),
     )
     conn.commit()
@@ -183,6 +214,16 @@ def get_source(source_id: int) -> dict | None:
     """Return a single source by id, or None if it does not exist."""
     conn = _get_conn()
     row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    conn.close()
+    return _source_from_row(row)
+
+
+def get_source_by_ingest_job(ingest_job_id: int) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM sources WHERE ingest_job_id = ?",
+        (ingest_job_id,),
+    ).fetchone()
     conn.close()
     return _source_from_row(row)
 
@@ -329,7 +370,7 @@ def log_search(
         """INSERT INTO search_history (question, answer, sources, tags_used, workspace, searched_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (question, answer, json.dumps(sources), json.dumps(tags_used), workspace,
-         datetime.now(timezone.utc).isoformat()),
+         _utcnow()),
     )
     conn.commit()
     conn.close()
@@ -431,7 +472,7 @@ def log_api_usage(model_id: str, operation: str, input_tokens: int,
         """INSERT INTO api_usage (model_id, operation, input_tokens, output_tokens, cost_usd, workspace, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (model_id, operation, input_tokens, output_tokens, cost_usd, workspace,
-         datetime.now(timezone.utc).isoformat()),
+         _utcnow()),
     )
     conn.commit()
     conn.close()
@@ -483,17 +524,22 @@ def create_ingest_job(
     title: str,
     payload: dict,
     workspace: str = "default",
+    progress_total: int = 0,
+    progress_message: str | None = None,
 ) -> int:
     conn = _get_conn()
     cur = conn.execute(
-        """INSERT INTO ingest_jobs (job_type, title, workspace, payload, status, created_at)
-           VALUES (?, ?, ?, ?, 'pending', ?)""",
+        """INSERT INTO ingest_jobs
+           (job_type, title, workspace, payload, status, progress_total, progress_message, created_at)
+           VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)""",
         (
             job_type,
             title,
             workspace,
             json.dumps(payload),
-            datetime.now(timezone.utc).isoformat(),
+            progress_total,
+            progress_message,
+            _utcnow(),
         ),
     )
     conn.commit()
@@ -525,21 +571,52 @@ def get_ingest_jobs(limit: int = 25, workspace: str | None = None) -> list[dict]
     return [_job_from_row(row) for row in rows]
 
 
-def claim_next_ingest_job() -> dict | None:
+def claim_next_ingest_job(worker_id: str, lease_seconds: int) -> dict | None:
     conn = _get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        now = _utcnow()
+        conn.execute(
+            """UPDATE ingest_jobs
+               SET status = 'pending', worker_id = NULL, heartbeat_at = NULL, lease_expires_at = NULL,
+                   progress_current = 0,
+                   progress_message = COALESCE(progress_message, 'Recovered after stale worker lease')
+               WHERE status = 'running' AND lease_expires_at IS NULL"""
+        )
         row = conn.execute(
-            "SELECT * FROM ingest_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+            """SELECT * FROM ingest_jobs
+               WHERE status = 'pending'
+                  OR (status = 'running' AND lease_expires_at < ?)
+               ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at ASC
+               LIMIT 1""",
+            (now,),
         ).fetchone()
         if row is None:
             conn.commit()
             return None
 
-        started_at = datetime.now(timezone.utc).isoformat()
+        lease_expires_at = datetime.fromisoformat(now).timestamp() + lease_seconds
+        lease_iso = datetime.fromtimestamp(lease_expires_at, tz=timezone.utc).isoformat()
         cur = conn.execute(
-            "UPDATE ingest_jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'",
-            (started_at, row["id"]),
+            """UPDATE ingest_jobs
+               SET status = 'running',
+                   started_at = COALESCE(started_at, ?),
+                   worker_id = ?,
+                   heartbeat_at = ?,
+                   lease_expires_at = ?,
+                   finished_at = NULL,
+                   error = NULL,
+                   attempt_count = attempt_count + 1,
+                   progress_current = CASE
+                       WHEN status = 'pending' THEN progress_current
+                       ELSE 0
+                   END
+               WHERE id = ?
+                 AND (
+                   status = 'pending'
+                   OR (status = 'running' AND lease_expires_at < ?)
+                 )""",
+            (now, worker_id, now, lease_iso, row["id"], now),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -547,19 +624,92 @@ def claim_next_ingest_job() -> dict | None:
         conn.commit()
         job = _job_from_row(row)
         job["status"] = "running"
-        job["started_at"] = started_at
+        job["started_at"] = row["started_at"] or now
+        job["worker_id"] = worker_id
+        job["heartbeat_at"] = now
+        job["lease_expires_at"] = lease_iso
+        job["attempt_count"] = int(job.get("attempt_count", 0) or 0) + 1
+        if row["status"] == "running":
+            job["progress_current"] = 0
         return job
     finally:
         conn.close()
+
+
+def update_ingest_job_progress(
+    job_id: int,
+    worker_id: str,
+    progress_current: int,
+    *,
+    progress_total: int | None = None,
+    progress_message: str | None = None,
+    lease_seconds: int = 0,
+) -> bool:
+    conn = _get_conn()
+    now = _utcnow()
+    params: list[object] = [progress_current]
+    assignments = ["progress_current = ?"]
+    if progress_total is not None:
+        assignments.append("progress_total = ?")
+        params.append(progress_total)
+    if progress_message is not None:
+        assignments.append("progress_message = ?")
+        params.append(progress_message)
+    assignments.append("heartbeat_at = ?")
+    params.append(now)
+    if lease_seconds > 0:
+        lease_expires_at = datetime.fromtimestamp(
+            datetime.fromisoformat(now).timestamp() + lease_seconds,
+            tz=timezone.utc,
+        ).isoformat()
+        assignments.append("lease_expires_at = ?")
+        params.append(lease_expires_at)
+    params.extend([job_id, worker_id])
+    cur = conn.execute(
+        f"UPDATE ingest_jobs SET {', '.join(assignments)} WHERE id = ? AND worker_id = ? AND status = 'running'",
+        params,
+    )
+    conn.commit()
+    updated = cur.rowcount == 1
+    conn.close()
+    return updated
+
+
+def touch_ingest_job_lease(job_id: int, worker_id: str, lease_seconds: int) -> bool:
+    conn = _get_conn()
+    now = _utcnow()
+    lease_expires_at = datetime.fromtimestamp(
+        datetime.fromisoformat(now).timestamp() + lease_seconds,
+        tz=timezone.utc,
+    ).isoformat()
+    cur = conn.execute(
+        """UPDATE ingest_jobs
+           SET heartbeat_at = ?, lease_expires_at = ?
+           WHERE id = ? AND worker_id = ? AND status = 'running'""",
+        (now, lease_expires_at, job_id, worker_id),
+    )
+    conn.commit()
+    updated = cur.rowcount == 1
+    conn.close()
+    return updated
 
 
 def complete_ingest_job(job_id: int, result: dict) -> None:
     conn = _get_conn()
     conn.execute(
         """UPDATE ingest_jobs
-           SET status = 'succeeded', result = ?, error = NULL, finished_at = ?
+           SET status = 'succeeded',
+               result = ?,
+               error = NULL,
+               finished_at = ?,
+               heartbeat_at = NULL,
+               lease_expires_at = NULL,
+               progress_current = CASE
+                   WHEN progress_total > 0 THEN progress_total
+                   ELSE progress_current
+               END
            WHERE id = ?""",
-        (json.dumps(result), datetime.now(timezone.utc).isoformat(), job_id),
+        (json.dumps(result), _utcnow(), job_id),
     )
     conn.commit()
     conn.close()
@@ -569,26 +719,78 @@ def fail_ingest_job(job_id: int, error: str) -> None:
     conn = _get_conn()
     conn.execute(
         """UPDATE ingest_jobs
-           SET status = 'failed', error = ?, finished_at = ?
+           SET status = 'failed',
+               error = ?,
+               finished_at = ?,
+               heartbeat_at = NULL,
+               lease_expires_at = NULL
            WHERE id = ?""",
-        (error, datetime.now(timezone.utc).isoformat(), job_id),
+        (error, _utcnow(), job_id),
     )
     conn.commit()
     conn.close()
 
 
-def cancel_ingest_job(job_id: int) -> bool:
+def cancel_ingest_job(job_id: int) -> str | None:
     conn = _get_conn()
     cur = conn.execute(
         """UPDATE ingest_jobs
            SET status = 'cancelled', finished_at = ?
            WHERE id = ? AND status = 'pending'""",
-        (datetime.now(timezone.utc).isoformat(), job_id),
+        (_utcnow(), job_id),
+    )
+    if cur.rowcount == 1:
+        conn.commit()
+        conn.close()
+        return "cancelled"
+
+    cur = conn.execute(
+        """UPDATE ingest_jobs
+           SET status = 'cancelling'
+           WHERE id = ? AND status = 'running'""",
+        (job_id,),
     )
     conn.commit()
-    cancelled = cur.rowcount == 1
     conn.close()
-    return cancelled
+    if cur.rowcount == 1:
+        return "cancelling"
+    return None
+
+
+def is_ingest_job_cancelling(job_id: int, worker_id: str) -> bool:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM ingest_jobs WHERE id = ? AND worker_id = ? AND status = 'cancelling'",
+        (job_id, worker_id),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_ingest_job_cancelled(job_id: int, worker_id: str | None = None) -> None:
+    conn = _get_conn()
+    if worker_id:
+        conn.execute(
+            """UPDATE ingest_jobs
+               SET status = 'cancelled',
+                   finished_at = ?,
+                   heartbeat_at = NULL,
+                   lease_expires_at = NULL
+               WHERE id = ? AND worker_id = ?""",
+            (_utcnow(), job_id, worker_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE ingest_jobs
+               SET status = 'cancelled',
+                   finished_at = ?,
+                   heartbeat_at = NULL,
+                   lease_expires_at = NULL
+               WHERE id = ?""",
+            (_utcnow(), job_id),
+        )
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
