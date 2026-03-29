@@ -348,6 +348,101 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+_ingest_cfg = config.ui("ingest")
+_ask_cfg = config.ui("ask")
+_ingestion_cfg = config.ingestion()
+logger = logging.getLogger(__name__)
+
+
+def _tag_input(key: str) -> list[str]:
+    label = _ingest_cfg.get("tag_label", "Tags (comma-separated, optional)")
+    placeholder = _ingest_cfg.get("tag_placeholder", "e.g. aws, architecture, reliability")
+    raw = st.text_input(label, key=key, placeholder=placeholder)
+    return [t.strip() for t in raw.split(",") if t.strip()] if raw.strip() else []
+
+
+def _build_export_md(question: str, result: dict) -> str:
+    lines = [
+        f"# {question}",
+        f"*Exported from {_brand.get('app_name', 'SecondBrain')} — {datetime.date.today()}*",
+        "", "## Answer", result["answer"], "", "## Sources",
+    ]
+    for i, src in enumerate(result.get("sources", []), 1):
+        lines.append(f"### {i}. {src['title']}")
+        if src.get("url"):
+            lines.append(f"**URL:** {src['url']}")
+        lines.append(f"**Score:** {src.get('score', 'n/a')}")
+        lines.append("")
+        lines.append(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_metric_card(value: str | int | float, label: str, kicker: str = "Workspace") -> None:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-kicker">{html.escape(kicker)}</div>
+            <div class="metric-value">{html.escape(str(value))}</div>
+            <div class="metric-label">{html.escape(label)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_badges(items: list[str], class_name: str = "meta-pill") -> str:
+    return "".join(
+        f'<span class="{class_name}">{html.escape(item)}</span>'
+        for item in items if item
+    )
+
+
+def _format_model_name(model_id: str | None) -> str:
+    if not model_id:
+        return "default"
+    model = next((m for m in config.models("embedding") if m["id"] == model_id), None)
+    return model["name"] if model else model_id
+
+
+def _source_preview(source_id: int, limit: int = 220) -> str:
+    preview = db.get_chunk_preview_for_source(source_id).strip().replace("\n", " ")
+    if not preview:
+        return "No extracted text stored for this source yet."
+    return preview[:limit] + ("..." if len(preview) > limit else "")
+
+
+def _format_timestamp(value: str | None) -> str:
+    if not value:
+        return "Not started"
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _job_summary(job: dict) -> str:
+    status = job.get("status")
+    result = job.get("result") or {}
+    if status == "pending":
+        return "Queued and waiting for the worker."
+    if status == "running":
+        started_at = _format_timestamp(job.get("started_at"))
+        return f"Running since {started_at}."
+    if status == "cancelled":
+        return "Cancelled before processing started."
+    if status == "failed":
+        return job.get("error") or "Job failed."
+    if job.get("job_type") == "bulk_urls":
+        return f"Completed {result.get('succeeded', 0)} of {result.get('total_urls', 0)} URLs."
+    if "chunks" in result:
+        return f"Stored {result['chunks']} chunks."
+    return "Completed."
+
+# ---------------------------------------------------------------------------
 # Sidebar — workspace + settings
 # ---------------------------------------------------------------------------
 ws_cfg = config.workspaces()
@@ -462,101 +557,6 @@ _ui = config.ui()
 tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval = st.tabs(
     ["📥 Ingest", "💬 Ask", "📜 History", "📚 Sources", "📡 RSS Feeds", "📊 Analytics", "🧪 Eval"]
 )
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-_ingest_cfg = config.ui("ingest")
-_ask_cfg = config.ui("ask")
-_ingestion_cfg = config.ingestion()
-logger = logging.getLogger(__name__)
-
-
-def _tag_input(key: str) -> list[str]:
-    label = _ingest_cfg.get("tag_label", "Tags (comma-separated, optional)")
-    placeholder = _ingest_cfg.get("tag_placeholder", "e.g. aws, architecture, reliability")
-    raw = st.text_input(label, key=key, placeholder=placeholder)
-    return [t.strip() for t in raw.split(",") if t.strip()] if raw.strip() else []
-
-
-def _build_export_md(question: str, result: dict) -> str:
-    lines = [
-        f"# {question}",
-        f"*Exported from {_brand.get('app_name', 'SecondBrain')} — {datetime.date.today()}*",
-        "", "## Answer", result["answer"], "", "## Sources",
-    ]
-    for i, src in enumerate(result.get("sources", []), 1):
-        lines.append(f"### {i}. {src['title']}")
-        if src.get("url"):
-            lines.append(f"**URL:** {src['url']}")
-        lines.append(f"**Score:** {src.get('score', 'n/a')}")
-        lines.append("")
-        lines.append(src["text"][:500] + ("..." if len(src["text"]) > 500 else ""))
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _render_metric_card(value: str | int | float, label: str, kicker: str = "Workspace") -> None:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-kicker">{html.escape(kicker)}</div>
-            <div class="metric-value">{html.escape(str(value))}</div>
-            <div class="metric-label">{html.escape(label)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _render_badges(items: list[str], class_name: str = "meta-pill") -> str:
-    return "".join(
-        f'<span class="{class_name}">{html.escape(item)}</span>'
-        for item in items if item
-    )
-
-
-def _format_model_name(model_id: str | None) -> str:
-    if not model_id:
-        return "default"
-    model = next((m for m in config.models("embedding") if m["id"] == model_id), None)
-    return model["name"] if model else model_id
-
-
-def _source_preview(source_id: int, limit: int = 220) -> str:
-    preview = db.get_chunk_preview_for_source(source_id).strip().replace("\n", " ")
-    if not preview:
-        return "No extracted text stored for this source yet."
-    return preview[:limit] + ("..." if len(preview) > limit else "")
-
-
-def _format_timestamp(value: str | None) -> str:
-    if not value:
-        return "Not started"
-    try:
-        parsed = datetime.datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
-
-
-def _job_summary(job: dict) -> str:
-    status = job.get("status")
-    result = job.get("result") or {}
-    if status == "pending":
-        return "Queued and waiting for the worker."
-    if status == "running":
-        started_at = _format_timestamp(job.get("started_at"))
-        return f"Running since {started_at}."
-    if status == "cancelled":
-        return "Cancelled before processing started."
-    if status == "failed":
-        return job.get("error") or "Job failed."
-    if job.get("job_type") == "bulk_urls":
-        return f"Completed {result.get('succeeded', 0)} of {result.get('total_urls', 0)} URLs."
-    if "chunks" in result:
-        return f"Stored {result['chunks']} chunks."
-    return "Completed."
 
 
 # ---------------------------------------------------------------------------
