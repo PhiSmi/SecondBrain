@@ -1,5 +1,7 @@
 """Ingestion pipeline — chunking, embedding, and storage for all content types."""
 
+from __future__ import annotations
+
 import logging
 import re
 import uuid

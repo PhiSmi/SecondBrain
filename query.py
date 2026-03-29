@@ -11,6 +11,8 @@ Supports:
 - Configurable similarity threshold
 """
 
+from __future__ import annotations
+
 import math
 import os
 import re
