@@ -33,274 +33,92 @@ _theme = config.theme()
 
 _css = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
-
-:root {{
-    --primary: {_theme["primary_color"]};
-    --secondary: {_theme["secondary_color"]};
-    --bg: {_theme["background_dark"]};
-    --surface: {_theme["surface_color"]};
-    --surface-hover: {_theme["surface_hover"]};
-    --text: {_theme["text_primary"]};
-    --muted: {_theme["text_secondary"]};
-    --border: {_theme["border_color"]};
-    --success: {_theme["success_color"]};
-    --warning: {_theme["warning_color"]};
-    --error: {_theme["error_color"]};
-}}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 .stApp {{
-    font-family: {_theme.get("font_family", "Manrope, sans-serif")};
-    color: var(--text);
-    background:
-        radial-gradient(circle at top right, {_theme["secondary_color"]}22 0%, transparent 28%),
-        radial-gradient(circle at top left, {_theme["primary_color"]}26 0%, transparent 34%),
-        linear-gradient(180deg, {_theme["background_dark"]} 0%, #08111d 100%);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }}
 
-.main .block-container {{
-    max-width: 1280px;
-    padding-top: 1.6rem;
-    padding-bottom: 2.4rem;
-}}
-
-[data-testid="stSidebar"] {{
-    background:
-        radial-gradient(circle at top, {_theme["secondary_color"]}18 0%, transparent 32%),
-        linear-gradient(180deg, rgba(7,18,31,0.96), rgba(10,22,36,0.96));
-    border-right: 1px solid var(--border);
-}}
-
-[data-testid="stSidebar"] .block-container {{
-    padding-top: 1.35rem;
-}}
-
+/* ---- Header ---- */
 .app-header {{
-    position: relative;
-    overflow: hidden;
-    background:
-        linear-gradient(135deg, {_theme["gradient_start"]} 0%, {_theme["gradient_end"]} 100%);
-    padding: 1.7rem 2rem 1.8rem;
-    border-radius: 22px;
-    border: 1px solid rgba(255,255,255,0.12);
-    box-shadow: 0 26px 60px rgba(5, 14, 23, 0.36);
-    margin-bottom: 1.1rem;
+    background: linear-gradient(135deg, {_theme["gradient_start"]}, {_theme["gradient_end"]});
+    padding: 1.4rem 1.8rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
 }}
-
-.app-header::after {{
-    content: "";
-    position: absolute;
-    inset: auto -10% -45% auto;
-    width: 320px;
-    height: 320px;
-    background: radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 70%);
-    pointer-events: none;
-}}
-
 .app-header h1 {{
-    color: white;
-    font-size: 2rem;
-    font-weight: 800;
-    margin: 0 0 0.35rem 0;
-    letter-spacing: -0.03em;
+    color: #fff; font-size: 1.6rem; font-weight: 700; margin: 0 0 0.2rem 0;
 }}
-
 .app-header p {{
-    color: rgba(255,255,255,0.82);
-    font-size: 1rem;
-    margin: 0;
-    max-width: 52rem;
-    line-height: 1.55;
+    color: rgba(255,255,255,0.8); font-size: 0.92rem; margin: 0; line-height: 1.5;
 }}
 
-.hero-pills {{
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6rem;
-    margin-top: 1rem;
-}}
-
-.hero-pill {{
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.45rem 0.8rem;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.08);
-    color: rgba(255,255,255,0.92);
-    font-size: 0.82rem;
-    font-weight: 600;
-    backdrop-filter: blur(10px);
-}}
-
+/* ---- Metric cards ---- */
 .metric-card {{
-    background:
-        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00)),
-        rgba(8, 17, 29, 0.62);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 1rem 1.1rem;
-    margin-bottom: 0.55rem;
-    box-shadow: 0 18px 40px rgba(4, 12, 20, 0.2);
+    border: 1px solid {_theme["border_color"]};
+    border-radius: 10px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.4rem;
 }}
-
 .metric-card .metric-kicker {{
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    font-size: 0.7rem;
-    font-weight: 700;
-    margin-bottom: 0.35rem;
+    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+    opacity: 0.5; margin-bottom: 0.2rem;
 }}
-
 .metric-card .metric-value {{
-    font-size: 1.95rem;
-    font-weight: 800;
-    line-height: 1.05;
-    color: var(--text);
-    letter-spacing: -0.05em;
+    font-size: 1.6rem; font-weight: 700; line-height: 1.1;
 }}
-
 .metric-card .metric-label {{
-    font-size: 0.84rem;
-    margin-top: 0.35rem;
-    color: var(--muted);
+    font-size: 0.78rem; opacity: 0.55; margin-top: 0.15rem;
 }}
 
+/* ---- Pills / badges ---- */
 .workspace-badge, .meta-pill {{
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    background: rgba(255,255,255,0.04);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.32rem 0.7rem;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0.35rem 0.35rem 0;
+    display: inline-block;
+    border: 1px solid {_theme["border_color"]};
+    border-radius: 6px;
+    padding: 0.18rem 0.55rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    margin: 0 0.3rem 0.3rem 0;
 }}
-
 .workspace-badge {{
-    background: {_theme["primary_color"]}16;
+    background: {_theme["primary_color"]}18;
     border-color: {_theme["primary_color"]}44;
-    color: white;
 }}
 
-.sidebar-panel, .section-panel {{
-    background: rgba(9, 18, 30, 0.56);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 0.95rem 1rem;
-    margin-bottom: 0.85rem;
-    box-shadow: 0 14px 32px rgba(4, 12, 20, 0.18);
+/* ---- Sidebar panels ---- */
+.sidebar-panel {{
+    border: 1px solid {_theme["border_color"]};
+    border-radius: 10px;
+    padding: 0.8rem 0.9rem;
+    margin-bottom: 0.7rem;
+}}
+.sidebar-panel h4 {{
+    margin: 0 0 0.4rem 0; font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.5;
 }}
 
-.section-panel h4, .sidebar-panel h4 {{
-    margin: 0 0 0.55rem 0;
-    font-size: 0.9rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--muted);
-}}
-
+/* ---- Divider ---- */
 .section-divider {{
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.14), transparent);
-    margin: 1.25rem 0;
-    border: none;
+    background: linear-gradient(90deg, transparent, {_theme["border_color"]}, transparent);
+    margin: 1rem 0; border: none;
 }}
 
+/* ---- Eval scores ---- */
 .eval-score-1, .eval-score-2 {{ color: {_theme["error_color"]}; font-weight: 700; }}
 .eval-score-3 {{ color: {_theme["warning_color"]}; font-weight: 700; }}
 .eval-score-4, .eval-score-5 {{ color: {_theme["success_color"]}; font-weight: 700; }}
 
-.stTabs [data-baseweb="tab-list"] {{
-    gap: 0.45rem;
-    background: rgba(9,18,30,0.5);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.35rem;
-}}
+/* ---- Tabs ---- */
+.stTabs [data-baseweb="tab-list"] {{ gap: 0.15rem; }}
+.stTabs [data-baseweb="tab"] {{ padding: 0.4rem 0.9rem; font-weight: 600; font-size: 0.88rem; }}
 
-.stTabs [data-baseweb="tab"] {{
-    border-radius: 999px;
-    padding: 0.45rem 1rem;
-    font-weight: 700;
-    color: var(--muted);
-    transition: all 0.2s ease;
-}}
-
-.stTabs [aria-selected="true"] {{
-    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    color: white !important;
-}}
-
-[data-testid="stExpander"] {{
-    background: rgba(9, 18, 30, 0.56);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    overflow: hidden;
-}}
-
-.stButton > button, .stDownloadButton > button {{
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    font-weight: 700;
-    box-shadow: none;
-}}
-
-.stButton > button[kind="primary"], .stDownloadButton > button {{
-    background: linear-gradient(135deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
-    color: white;
-}}
-
-.stButton > button:hover, .stDownloadButton > button:hover {{
-    border-color: rgba(255,255,255,0.24);
-}}
-
-[data-testid="stTextInputRootElement"],
-[data-testid="stTextAreaRootElement"],
-[data-baseweb="select"] > div,
-[data-testid="stFileUploader"] section {{
-    border-radius: 16px !important;
-    border-color: var(--border) !important;
-    background: rgba(9, 18, 30, 0.56) !important;
-}}
-
-[data-testid="stChatMessage"] {{
-    background: rgba(9, 18, 30, 0.56);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 0.3rem 0.5rem;
-    margin-bottom: 0.65rem;
-}}
-
-.source-summary {{
-    color: var(--muted);
-    font-size: 0.92rem;
-    line-height: 1.5;
-}}
-
-.source-tools {{
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.35rem;
-}}
-
-.tiny-label {{
-    color: var(--muted);
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    font-weight: 700;
-}}
-
-code {{
-    font-family: 'IBM Plex Mono', monospace !important;
-}}
+/* ---- Misc ---- */
+.source-summary {{ opacity: 0.6; font-size: 0.88rem; line-height: 1.45; }}
+.source-tools {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.3rem; }}
+.tiny-label {{ font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.5; font-weight: 600; }}
+code {{ font-family: 'JetBrains Mono', monospace !important; }}
 </style>
 """
 st.markdown(_css, unsafe_allow_html=True)
@@ -536,32 +354,6 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-hero_pills = [
-    f"Workspace: {active_workspace}",
-    f"{workspace_stats['source_count']} sources",
-    f"{workspace_stats['chunk_count']} chunks",
-]
-if workspace_models:
-    hero_pills.append(f"Embeddings: {_format_model_name(workspace_models[0])}")
-
-st.markdown(
-    f"""
-    <div class="hero-pills">
-        {_render_badges(hero_pills, class_name="hero-pill")}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-hero_col1, hero_col2, hero_col3, hero_col4 = st.columns(4)
-with hero_col1:
-    _render_metric_card(workspace_stats["source_count"], "Sources")
-with hero_col2:
-    _render_metric_card(workspace_stats["chunk_count"], "Chunks")
-with hero_col3:
-    _render_metric_card(workspace_stats["query_count"], "Searches")
-with hero_col4:
-    _render_metric_card(f"${workspace_usage['total_cost_usd']:.4f}", "Workspace Cost")
 
 
 # ---------------------------------------------------------------------------

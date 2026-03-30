@@ -91,22 +91,22 @@ ui:
 # ---------------------------------------------------------------------------
 theme:
   # Colour palette — used in custom CSS
-  primary_color: "#2B6CB0"           # cobalt accent
-  secondary_color: "#1F8A8A"         # deep teal accent
-  background_dark: "#07131F"         # deep blue-black background
-  surface_color: "#102235"           # card / panel background
-  surface_hover: "#173149"           # card hover state
-  text_primary: "#ECF4FF"            # main text
-  text_secondary: "#8CA7BF"          # muted text / captions
-  border_color: "#1E3A53"            # subtle borders
-  success_color: "#32C48D"           # green for success states
-  warning_color: "#F2A33C"           # amber for warnings
-  error_color: "#F16A5B"             # red for errors
-  gradient_start: "#0E3153"          # header gradient from
-  gradient_end: "#197278"            # header gradient to
+  primary_color: "#3B82F6"           # blue accent
+  secondary_color: "#06B6D4"         # cyan accent
+  background_dark: "#0B1120"         # deep navy background
+  surface_color: "#151E30"           # card / panel background
+  surface_hover: "#1C2740"           # card hover state
+  text_primary: "#E2E8F0"            # main text
+  text_secondary: "#94A3B8"          # muted text / captions
+  border_color: "#1E293B"            # subtle borders
+  success_color: "#22C55E"           # green for success states
+  warning_color: "#F59E0B"           # amber for warnings
+  error_color: "#EF4444"             # red for errors
+  gradient_start: "#1E3A5F"          # header gradient from
+  gradient_end: "#164E63"            # header gradient to
 
   # Font
-  font_family: "'Manrope', 'Segoe UI', system-ui, -apple-system, sans-serif"
+  font_family: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
 
 # ---------------------------------------------------------------------------
 # Models
