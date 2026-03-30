@@ -82,6 +82,33 @@ class TestSources:
         assert db.get_embedding_models("alpha") == ["model-a", "model-b"]
 
 
+class TestWorkspaces:
+    def setup_method(self):
+        self._orig = db.DB_PATH
+        db.DB_PATH = Path(_temp_db())
+
+    def teardown_method(self):
+        os.unlink(db.DB_PATH)
+        db.DB_PATH = self._orig
+
+    def test_create_workspace_persists_without_sources(self):
+        created = db.create_workspace("Project Alpha")
+        assert created == "project-alpha"
+        assert "project-alpha" in db.get_workspaces()
+
+    def test_create_workspace_requires_real_name(self):
+        try:
+            db.create_workspace("   ")
+        except ValueError as exc:
+            assert "Workspace name" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for blank workspace name")
+
+    def test_workspace_is_registered_from_activity(self):
+        db.log_search("Q", "A", [], [], workspace="new-space")
+        assert "new-space" in db.get_workspaces()
+
+
 class TestChunks:
     def setup_method(self):
         self._orig = db.DB_PATH

@@ -1,9 +1,12 @@
 """SQLite metadata helpers for tracking ingested sources."""
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+import config
 
 DB_PATH = Path(__file__).parent / "data" / "metadata.db"
 DEFAULT_EMBED_MODEL = "all-MiniLM-L6-v2"
@@ -41,10 +44,19 @@ def _job_from_row(row: sqlite3.Row | None) -> dict | None:
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS workspaces (
+            name        TEXT PRIMARY KEY,
+            description TEXT,
+            created_at  TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sources (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             title       TEXT    NOT NULL,
@@ -159,6 +171,40 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+def normalise_workspace_name(name: str) -> str:
+    """Normalise arbitrary user input into a stable workspace name."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or "").strip().lower()).strip("-_")
+    if not cleaned:
+        raise ValueError("Workspace name must contain letters or numbers")
+    return cleaned
+
+
+def ensure_workspace(name: str, description: str | None = None) -> str:
+    """Persist a workspace name so it exists even before sources are added."""
+    workspace = normalise_workspace_name(name)
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO workspaces (name, description, created_at)
+               VALUES (?, ?, ?)""",
+            (workspace, description, _utcnow()),
+        )
+        if description:
+            conn.execute(
+                "UPDATE workspaces SET description = COALESCE(description, ?) WHERE name = ?",
+                (description, workspace),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return workspace
+
+
+def create_workspace(name: str, description: str | None = None) -> str:
+    """Create or return a persistent workspace."""
+    return ensure_workspace(name, description=description)
+
+
 # ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
@@ -174,6 +220,7 @@ def log_source(
     ingest_job_id: int | None = None,
 ) -> int:
     """Record a newly ingested source. Returns the source id."""
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     cur = conn.execute(
         """INSERT INTO sources
@@ -245,9 +292,14 @@ def get_all_tags(workspace: str | None = None) -> list[str]:
 def get_workspaces() -> list[str]:
     """Return a sorted list of all workspaces that have at least one source."""
     conn = _get_conn()
-    rows = conn.execute("SELECT DISTINCT workspace FROM sources ORDER BY workspace").fetchall()
+    rows = conn.execute("SELECT name FROM workspaces ORDER BY name").fetchall()
     conn.close()
-    return [r["workspace"] for r in rows]
+    configured = [
+        workspace["name"]
+        for workspace in config.workspaces().get("predefined", [])
+        if workspace.get("name")
+    ]
+    return sorted(set(configured + [r["name"] for r in rows]))
 
 
 def get_embedding_models(workspace: str | None = None) -> list[str]:
@@ -365,6 +417,7 @@ def log_search(
     workspace: str = "default",
 ) -> None:
     """Record a search query and its answer."""
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     conn.execute(
         """INSERT INTO search_history (question, answer, sources, tags_used, workspace, searched_at)
@@ -467,6 +520,7 @@ def get_stats(workspace: str | None = None) -> dict:
 
 def log_api_usage(model_id: str, operation: str, input_tokens: int,
                   output_tokens: int, cost_usd: float, workspace: str = "default") -> None:
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     conn.execute(
         """INSERT INTO api_usage (model_id, operation, input_tokens, output_tokens, cost_usd, workspace, created_at)
@@ -527,6 +581,7 @@ def create_ingest_job(
     progress_total: int = 0,
     progress_message: str | None = None,
 ) -> int:
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     cur = conn.execute(
         """INSERT INTO ingest_jobs
@@ -799,6 +854,7 @@ def mark_ingest_job_cancelled(job_id: int, worker_id: str | None = None) -> None
 
 def add_rss_feed(url: str, title: str | None = None, tags: list[str] | None = None,
                  workspace: str = "default") -> int:
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     cur = conn.execute(
         """INSERT OR IGNORE INTO rss_feeds (url, title, tags, workspace, created_at)
@@ -859,6 +915,7 @@ def toggle_rss_feed(feed_id: int, active: bool) -> None:
 
 def add_eval_pair(question: str, expected_answer: str, tags: list[str] | None = None,
                   workspace: str = "default") -> int:
+    workspace = ensure_workspace(workspace)
     conn = _get_conn()
     cur = conn.execute(
         """INSERT INTO eval_pairs (question, expected_answer, tags, workspace, created_at)

@@ -13,6 +13,7 @@ import db
 import evaluate
 import ingest
 import query
+import runtime_checks
 
 background_jobs.ensure_worker_running()
 
@@ -33,92 +34,265 @@ _theme = config.theme()
 
 _css = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {{
+    --sb-primary: {_theme["primary_color"]};
+    --sb-secondary: {_theme["secondary_color"]};
+    --sb-bg: {_theme["background_dark"]};
+    --sb-surface: {_theme["surface_color"]};
+    --sb-surface-hover: {_theme["surface_hover"]};
+    --sb-text: {_theme["text_primary"]};
+    --sb-muted: {_theme["text_secondary"]};
+    --sb-border: {_theme["border_color"]};
+    --sb-success: {_theme["success_color"]};
+    --sb-warning: {_theme["warning_color"]};
+    --sb-error: {_theme["error_color"]};
+}}
 
 .stApp {{
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: 'Space Grotesk', sans-serif;
+    color: var(--sb-text);
+    background:
+        radial-gradient(circle at top left, {_theme["gradient_start"]}55, transparent 30%),
+        radial-gradient(circle at top right, {_theme["secondary_color"]}22, transparent 22%),
+        linear-gradient(180deg, var(--sb-bg) 0%, #050a14 100%);
 }}
 
-/* ---- Header ---- */
+[data-testid="stAppViewContainer"] > .main {{
+    background: transparent;
+}}
+
+[data-testid="stSidebar"] {{
+    background:
+        linear-gradient(180deg, rgba(6, 13, 25, 0.98) 0%, rgba(8, 18, 34, 0.94) 100%);
+    border-right: 1px solid {_theme["border_color"]};
+}}
+
+.block-container {{
+    max-width: 1280px;
+    padding-top: 1.4rem;
+    padding-bottom: 2.5rem;
+}}
+
 .app-header {{
-    background: linear-gradient(135deg, {_theme["gradient_start"]}, {_theme["gradient_end"]});
-    padding: 1.4rem 1.8rem;
-    border-radius: 12px;
+    position: relative;
+    overflow: hidden;
+    background:
+        radial-gradient(circle at top right, {_theme["secondary_color"]}35, transparent 32%),
+        linear-gradient(135deg, {_theme["gradient_start"]}, {_theme["gradient_end"]});
+    border: 1px solid {_theme["border_color"]};
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+    padding: 1.7rem 1.8rem;
+    border-radius: 22px;
     margin-bottom: 1rem;
 }}
+
+.app-header::after {{
+    content: "";
+    position: absolute;
+    inset: auto -10% -60% auto;
+    width: 18rem;
+    height: 18rem;
+    background: {_theme["primary_color"]}18;
+    filter: blur(10px);
+    border-radius: 999px;
+}}
+
 .app-header h1 {{
-    color: #fff; font-size: 1.6rem; font-weight: 700; margin: 0 0 0.2rem 0;
+    color: #fff;
+    font-size: 2.15rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    margin: 0 0 0.35rem 0;
 }}
+
 .app-header p {{
-    color: rgba(255,255,255,0.8); font-size: 0.92rem; margin: 0; line-height: 1.5;
+    color: rgba(255,255,255,0.82);
+    font-size: 0.98rem;
+    margin: 0;
+    line-height: 1.55;
+    max-width: 56rem;
 }}
 
-/* ---- Metric cards ---- */
+.metric-card, .sidebar-panel, .guide-card, .status-card, .status-banner {{
+    background: linear-gradient(180deg, rgba(12, 22, 39, 0.86) 0%, rgba(8, 16, 30, 0.94) 100%);
+    border: 1px solid {_theme["border_color"]};
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.18);
+}}
+
 .metric-card {{
-    border: 1px solid {_theme["border_color"]};
-    border-radius: 10px;
-    padding: 0.9rem 1rem;
-    margin-bottom: 0.4rem;
-}}
-.metric-card .metric-kicker {{
-    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
-    opacity: 0.5; margin-bottom: 0.2rem;
-}}
-.metric-card .metric-value {{
-    font-size: 1.6rem; font-weight: 700; line-height: 1.1;
-}}
-.metric-card .metric-label {{
-    font-size: 0.78rem; opacity: 0.55; margin-top: 0.15rem;
+    border-radius: 18px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 0.45rem;
+    min-height: 8.2rem;
 }}
 
-/* ---- Pills / badges ---- */
-.workspace-badge, .meta-pill {{
+.metric-card .metric-kicker {{
+    color: var(--sb-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    margin-bottom: 0.35rem;
+}}
+
+.metric-card .metric-value {{
+    color: #fff;
+    font-size: 1.9rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+}}
+
+.metric-card .metric-label {{
+    color: var(--sb-muted);
+    font-size: 0.84rem;
+    line-height: 1.45;
+    margin-top: 0.35rem;
+}}
+
+.workspace-badge, .meta-pill, .status-pill {{
     display: inline-block;
-    border: 1px solid {_theme["border_color"]};
-    border-radius: 6px;
-    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    padding: 0.22rem 0.62rem;
     font-size: 0.72rem;
     font-weight: 600;
     margin: 0 0.3rem 0.3rem 0;
-}}
-.workspace-badge {{
-    background: {_theme["primary_color"]}18;
-    border-color: {_theme["primary_color"]}44;
+    border: 1px solid {_theme["border_color"]};
 }}
 
-/* ---- Sidebar panels ---- */
+.workspace-badge {{
+    background: {_theme["primary_color"]}14;
+    border-color: {_theme["primary_color"]}55;
+}}
+
+.status-pass {{
+    border-color: {_theme["success_color"]}55;
+}}
+
+.status-pass .status-pill {{
+    background: {_theme["success_color"]}18;
+    border-color: {_theme["success_color"]}55;
+}}
+
+.status-warning {{
+    border-color: {_theme["warning_color"]}55;
+}}
+
+.status-warning .status-pill {{
+    background: {_theme["warning_color"]}1A;
+    border-color: {_theme["warning_color"]}55;
+}}
+
+.status-fail {{
+    border-color: {_theme["error_color"]}55;
+}}
+
+.status-fail .status-pill {{
+    background: {_theme["error_color"]}16;
+    border-color: {_theme["error_color"]}55;
+}}
+
 .sidebar-panel {{
-    border: 1px solid {_theme["border_color"]};
-    border-radius: 10px;
-    padding: 0.8rem 0.9rem;
+    border-radius: 18px;
+    padding: 0.95rem 1rem;
+    margin-bottom: 0.8rem;
+}}
+
+.sidebar-panel h4 {{
+    color: var(--sb-muted);
+    margin: 0 0 0.5rem 0;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+}}
+
+.guide-card {{
+    border-radius: 18px;
+    padding: 1rem 1.05rem;
+    min-height: 10rem;
+}}
+
+.guide-card h4, .status-card h4 {{
+    margin: 0 0 0.4rem 0;
+    color: #fff;
+    font-size: 1rem;
+}}
+
+.guide-card p, .status-card p, .status-banner p {{
+    margin: 0;
+    color: var(--sb-muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}}
+
+.guide-kicker, .status-kicker, .tiny-label {{
+    color: var(--sb-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-weight: 600;
+}}
+
+.status-card {{
+    border-radius: 16px;
+    padding: 0.95rem 1rem;
     margin-bottom: 0.7rem;
 }}
-.sidebar-panel h4 {{
-    margin: 0 0 0.4rem 0; font-size: 0.72rem;
-    text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.5;
+
+.status-banner {{
+    border-radius: 18px;
+    padding: 1rem 1.1rem;
+    margin: 0 0 1rem 0;
 }}
 
-/* ---- Divider ---- */
 .section-divider {{
     height: 1px;
     background: linear-gradient(90deg, transparent, {_theme["border_color"]}, transparent);
-    margin: 1rem 0; border: none;
+    margin: 1.2rem 0;
+    border: none;
 }}
 
-/* ---- Eval scores ---- */
 .eval-score-1, .eval-score-2 {{ color: {_theme["error_color"]}; font-weight: 700; }}
 .eval-score-3 {{ color: {_theme["warning_color"]}; font-weight: 700; }}
 .eval-score-4, .eval-score-5 {{ color: {_theme["success_color"]}; font-weight: 700; }}
 
-/* ---- Tabs ---- */
-.stTabs [data-baseweb="tab-list"] {{ gap: 0.15rem; }}
-.stTabs [data-baseweb="tab"] {{ padding: 0.4rem 0.9rem; font-weight: 600; font-size: 0.88rem; }}
+.stTabs [data-baseweb="tab-list"] {{
+    gap: 0.35rem;
+    padding: 0.2rem;
+    background: rgba(8, 15, 28, 0.72);
+    border: 1px solid {_theme["border_color"]};
+    border-radius: 18px;
+}}
 
-/* ---- Misc ---- */
-.source-summary {{ opacity: 0.6; font-size: 0.88rem; line-height: 1.45; }}
-.source-tools {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.3rem; }}
-.tiny-label {{ font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.5; font-weight: 600; }}
-code {{ font-family: 'JetBrains Mono', monospace !important; }}
+.stTabs [data-baseweb="tab"] {{
+    padding: 0.6rem 1rem;
+    font-weight: 600;
+    font-size: 0.88rem;
+    border-radius: 14px;
+}}
+
+.source-summary {{
+    opacity: 0.8;
+    font-size: 0.9rem;
+    line-height: 1.55;
+}}
+
+.source-tools {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.35rem;
+}}
+
+.stButton > button, .stDownloadButton > button {{
+    border-radius: 12px;
+    border: 1px solid {_theme["border_color"]};
+}}
+
+code {{
+    font-family: 'IBM Plex Mono', monospace !important;
+}}
 </style>
 """
 st.markdown(_css, unsafe_allow_html=True)
@@ -277,34 +451,110 @@ def _job_progress(job: dict) -> tuple[float, str] | None:
 # ---------------------------------------------------------------------------
 # Sidebar — workspace + settings
 # ---------------------------------------------------------------------------
+def _status_label(status: str) -> str:
+    return {
+        "ok": "Healthy",
+        "degraded": "Needs attention",
+        "fail": "Blocked",
+        "pass": "Ready",
+        "warning": "Attention",
+    }.get(status, status.title())
+
+
+def _status_class(status: str) -> str:
+    return {
+        "ok": "status-pass",
+        "pass": "status-pass",
+        "degraded": "status-warning",
+        "warning": "status-warning",
+        "fail": "status-fail",
+    }.get(status, "status-warning")
+
+
+def _render_guide_card(kicker: str, title: str, body: str) -> str:
+    return f"""
+    <div class="guide-card">
+        <div class="guide-kicker">{html.escape(kicker)}</div>
+        <h4>{html.escape(title)}</h4>
+        <p>{html.escape(body)}</p>
+    </div>
+    """
+
+
+def _render_status_cards(system_status: dict) -> str:
+    cards = []
+    for check in system_status.get("checks", []):
+        hint = (
+            f'<p style="margin-top:0.55rem;"><span class="status-kicker">Suggested action</span><br>{html.escape(check["hint"])}</p>'
+            if check.get("hint")
+            else ""
+        )
+        cards.append(
+            f"""
+            <div class="status-card {_status_class(check["status"])}">
+                <div class="status-kicker">{html.escape(check["label"])}</div>
+                <h4><span class="status-pill">{html.escape(_status_label(check["status"]))}</span></h4>
+                <p>{html.escape(check["detail"])}</p>
+                {hint}
+            </div>
+            """
+        )
+    return "".join(cards)
+
+
+def _workspace_display(name: str, predefined_map: dict[str, dict]) -> str:
+    match = predefined_map.get(name, {})
+    icon = match.get("icon", "Folder")
+    description = match.get("description", "Saved workspace")
+    return f"{icon} {name} - {description}"
+
+
 ws_cfg = config.workspaces()
 with st.sidebar:
     if ws_cfg.get("enabled"):
         st.markdown("### Workspace")
         predefined = ws_cfg.get("predefined", [])
-        ws_names = [w["name"] for w in predefined]
-        for ws in db.get_workspaces():
-            if ws not in ws_names:
-                ws_names.append(ws)
+        predefined_map = {workspace["name"]: workspace for workspace in predefined}
+        ws_names = list(dict.fromkeys([w["name"] for w in predefined] + db.get_workspaces()))
+        if not ws_names:
+            ws_names = [ws_cfg.get("default", "default")]
 
-        ws_display = []
-        for name in ws_names:
-            match = next((w for w in predefined if w["name"] == name), None)
-            icon = match.get("icon", "📁") if match else "📁"
-            desc = match.get("description", "") if match else ""
-            ws_display.append(f"{icon} {name}" + (f" — {desc}" if desc else ""))
+        if (
+            "active_workspace" not in st.session_state
+            or st.session_state["active_workspace"] not in ws_names
+        ):
+            default_workspace = ws_cfg.get("default", "default")
+            st.session_state["active_workspace"] = (
+                default_workspace if default_workspace in ws_names else ws_names[0]
+            )
 
-        selected_ws_idx = st.selectbox(
-            "Active workspace", range(len(ws_names)),
-            format_func=lambda i: ws_display[i], label_visibility="collapsed",
+        active_workspace = st.selectbox(
+            "Active workspace",
+            ws_names,
+            index=ws_names.index(st.session_state["active_workspace"]),
+            format_func=lambda name: _workspace_display(name, predefined_map),
+            label_visibility="collapsed",
         )
-        active_workspace = ws_names[selected_ws_idx]
+        st.session_state["active_workspace"] = active_workspace
 
         with st.expander("New workspace"):
             new_ws_name = st.text_input("Name", placeholder="e.g. projects", key="new_ws")
+            new_ws_description = st.text_input(
+                "Description",
+                placeholder="What belongs in this workspace?",
+                key="new_ws_description",
+            )
             if st.button("Create") and new_ws_name.strip():
-                active_workspace = new_ws_name.strip().lower().replace(" ", "-")
-                st.rerun()
+                try:
+                    created_workspace = db.create_workspace(
+                        new_ws_name,
+                        description=new_ws_description.strip() or None,
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["active_workspace"] = created_workspace
+                    st.rerun()
 
         st.markdown(f'<div class="workspace-badge">Active: {active_workspace}</div>', unsafe_allow_html=True)
     else:
@@ -314,6 +564,7 @@ with st.sidebar:
     workspace_usage = db.get_api_usage_stats(workspace=active_workspace)
     global_usage = db.get_api_usage_stats()
     workspace_models = db.get_embedding_models(workspace=active_workspace)
+    system_status = runtime_checks.collect_system_status()
 
     st.markdown(
         f"""
@@ -336,6 +587,22 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+    st.markdown(
+        f"""
+        <div class="sidebar-panel {_status_class(system_status['status'])}">
+            <h4>System Status</h4>
+            <div class="source-tools">
+                <span class="status-pill">{html.escape(_status_label(system_status['status']))}</span>
+                <span class="meta-pill">{system_status['summary']['passed']}/{system_status['summary']['total']} checks</span>
+            </div>
+            <div class="source-summary" style="margin-top:0.3rem;">
+                Data persists in <code>{html.escape(system_status['paths']['data_dir'])}</code>.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if workspace_usage["total_calls"] > 0 or global_usage["total_calls"] > 0:
         st.markdown(
             f"""
@@ -343,18 +610,39 @@ with st.sidebar:
                 <h4>Usage</h4>
                 <div class="tiny-label">Current workspace</div>
                 <div style="font-size:1.15rem; font-weight:800; margin:0.25rem 0 0.55rem 0;">
-                    {workspace_usage['total_calls']} calls · ${workspace_usage['total_cost_usd']:.4f}
+                    {workspace_usage['total_calls']} calls | ${workspace_usage['total_cost_usd']:.4f}
                 </div>
                 <div class="tiny-label">All workspaces</div>
-                <div style="font-size:0.95rem; color: var(--muted);">
-                    {global_usage['total_calls']} calls · ${global_usage['total_cost_usd']:.4f}
+                <div style="font-size:0.95rem; color: var(--sb-muted);">
+                    {global_usage['total_calls']} calls | ${global_usage['total_cost_usd']:.4f}
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
+hero_col1, hero_col2, hero_col3, hero_col4 = st.columns(4)
+with hero_col1:
+    _render_metric_card(active_workspace, "Current workspace", kicker="Command")
+with hero_col2:
+    _render_metric_card(workspace_stats["source_count"], "Stored sources", kicker="Library")
+with hero_col3:
+    _render_metric_card(background_jobs.embedded_worker_status().title(), "Queue worker", kicker="Ingest")
+with hero_col4:
+    _render_metric_card(
+        f"{system_status['summary']['passed']}/{system_status['summary']['total']}",
+        _status_label(system_status["status"]),
+        kicker="Validation",
+    )
 
+st.markdown(
+    f"""
+    <div class="status-banner {_status_class(system_status['status'])}">
+        <p>{html.escape(system_status['persistence']['detail'])} Back up or mount <code>{html.escape(system_status['paths']['data_dir'])}</code> to keep your knowledge base across restarts.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -371,6 +659,42 @@ tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval 
 
 with tab_ingest:
     st.subheader(_ingest_cfg.get("heading", "Add Knowledge"))
+
+    guide_col1, guide_col2, guide_col3 = st.columns(3)
+    with guide_col1:
+        st.markdown(
+            _render_guide_card(
+                "Capture",
+                "Ingest from any starting point",
+                "Paste notes, save URLs, import files, or pull transcripts and RSS entries into the same workspace.",
+            ),
+            unsafe_allow_html=True,
+        )
+    with guide_col2:
+        st.markdown(
+            _render_guide_card(
+                "Persist",
+                "Keep data on local disk",
+                f"Metadata and vectors persist under {system_status['paths']['data_dir']}. Keep that directory between restarts.",
+            ),
+            unsafe_allow_html=True,
+        )
+    with guide_col3:
+        st.markdown(
+            _render_guide_card(
+                "Operate",
+                "Queue larger imports",
+                "Use background jobs for heavier imports so the UI stays responsive while the worker updates the library.",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("Setup and validation", expanded=system_status["status"] != "ok" or workspace_stats["source_count"] == 0):
+        st.markdown(
+            f'<div class="source-summary">{html.escape(system_status["persistence"]["detail"])} Current storage root: <code>{html.escape(system_status["paths"]["data_dir"])}.</code></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(_render_status_cards(system_status), unsafe_allow_html=True)
 
     input_types = _ingest_cfg.get("input_types", ["Paste text", "URL", "File upload", "YouTube", "Bulk URLs"])
     input_type = st.radio("Input type", input_types, horizontal=True, label_visibility="collapsed")
@@ -610,7 +934,7 @@ with tab_ingest:
             st.rerun()
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    jobs_header_col, jobs_refresh_col = st.columns([4, 1])
+    jobs_header_col, jobs_toggle_col, jobs_refresh_col = st.columns([3.2, 1.5, 1])
     with jobs_header_col:
         st.subheader(_ingest_cfg.get("jobs_heading", "Background Jobs"))
         worker_state = background_jobs.embedded_worker_status()
@@ -620,13 +944,26 @@ with tab_ingest:
             st.caption("Embedded worker online. Jobs can also be picked up by standalone workers.")
         else:
             st.caption("Embedded worker starting.")
+    with jobs_toggle_col:
+        auto_refresh_jobs = st.toggle(
+            "Auto-refresh queue",
+            value=True,
+            key=f"jobs_autorefresh_{active_workspace}",
+            help="Refresh the jobs panel every 3 seconds while this toggle is enabled.",
+        )
     with jobs_refresh_col:
         st.button("Refresh", key="refresh_background_jobs", use_container_width=True)
 
-    jobs = background_jobs.list_jobs(limit=12, workspace=active_workspace)
-    if not jobs:
-        st.info(_ingest_cfg.get("jobs_empty_message", "No ingestion jobs yet."))
-    else:
+    @st.fragment(run_every="3s" if auto_refresh_jobs else None)
+    def _render_jobs_fragment() -> None:
+        if auto_refresh_jobs:
+            st.caption("Queue updates every 3 seconds while auto-refresh is enabled.")
+
+        jobs = background_jobs.list_jobs(limit=12, workspace=active_workspace)
+        if not jobs:
+            st.info(_ingest_cfg.get("jobs_empty_message", "No ingestion jobs yet."))
+            return
+
         pending_jobs = sum(1 for job in jobs if job["status"] == "pending")
         active_jobs = sum(1 for job in jobs if job["status"] in {"running", "cancelling"})
         failed_jobs = sum(1 for job in jobs if job["status"] == "failed")
@@ -660,7 +997,7 @@ with tab_ingest:
                     st.caption(
                         f"Queued {_format_timestamp(job.get('created_at'))}"
                         + (
-                            f" • Finished {_format_timestamp(job.get('finished_at'))}"
+                            f" | Finished {_format_timestamp(job.get('finished_at'))}"
                             if job.get("finished_at")
                             else ""
                         )
@@ -668,14 +1005,15 @@ with tab_ingest:
                     st.caption(
                         f"Attempts: {job.get('attempt_count', 0)}"
                         + (
-                            f" • Last heartbeat {_format_timestamp(job.get('heartbeat_at'))}"
+                            f" | Last heartbeat {_format_timestamp(job.get('heartbeat_at'))}"
                             if job.get("heartbeat_at")
                             else ""
                         )
                     )
                     progress = _job_progress(job)
                     if progress is not None:
-                        st.progress(progress[0], text=progress[1])
+                        progress_text = progress[1].replace("•", "|")
+                        st.progress(progress[0], text=progress_text)
                     summary = _job_summary(job)
                     if job["status"] == "failed":
                         st.error(summary)
@@ -690,11 +1028,11 @@ with tab_ingest:
                         with st.expander("Batch details", expanded=False):
                             for item in job["result"]["results"]:
                                 if item.get("error"):
-                                    st.error(f"{item['url']} — {item['error']}")
+                                    st.error(f"{item['url']} | {item['error']}")
                                 elif item.get("warning"):
-                                    st.warning(f"{item['url']} — {item.get('chunks', 0)} chunks (JS-rendered)")
+                                    st.warning(f"{item['url']} | {item.get('chunks', 0)} chunks (JS-rendered)")
                                 else:
-                                    st.write(f"{item['url']} — {item.get('chunks', 0)} chunks")
+                                    st.write(f"{item['url']} | {item.get('chunks', 0)} chunks")
                 with action_col:
                     if job["status"] in {"pending", "running"} and st.button(
                         "Cancel" if job["status"] == "pending" else "Stop",
@@ -710,6 +1048,7 @@ with tab_ingest:
                             st.rerun()
                         st.warning(f"Job #{job['id']} could not be cancelled.")
 
+    _render_jobs_fragment()
 
 # ---------------------------------------------------------------------------
 # ASK TAB

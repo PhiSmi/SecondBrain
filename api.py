@@ -15,6 +15,7 @@ import background_jobs  # noqa: E402
 import db  # noqa: E402
 import ingest  # noqa: E402
 import query  # noqa: E402
+import runtime_checks  # noqa: E402
 
 app = FastAPI(
     title="SecondBrain API",
@@ -93,6 +94,15 @@ class TagSuggestRequest(BaseModel):
 
 class TagSuggestResponse(BaseModel):
     tags: list[str]
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class WorkspaceResponse(BaseModel):
+    name: str
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +211,17 @@ def api_suggest_tags(req: TagSuggestRequest):
     return TagSuggestResponse(tags=tags)
 
 
+@app.get("/workspaces", response_model=list[WorkspaceResponse])
+def api_list_workspaces():
+    return [WorkspaceResponse(name=name) for name in db.get_workspaces()]
+
+
+@app.post("/workspaces", response_model=WorkspaceResponse)
+def api_create_workspace(req: WorkspaceCreateRequest):
+    workspace = db.create_workspace(req.name, description=req.description)
+    return WorkspaceResponse(name=workspace)
+
+
 @app.get("/sources")
 def api_list_sources(workspace: str | None = None):
     """List all ingested sources."""
@@ -249,4 +270,4 @@ def api_cancel_job(job_id: int):
 
 @app.get("/health")
 def api_health():
-    return {"status": "ok"}
+    return runtime_checks.collect_system_status()

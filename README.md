@@ -61,6 +61,7 @@ The result is a searchable memory layer for content already collected:
 ### Workspace and Ops
 
 - Separate workspaces
+- Persisted workspace registry so empty workspaces remain selectable
 - Per-source embedding model tracking
 - Background ingestion jobs with persisted status
 - Standalone worker support for durable queued ingestion
@@ -84,6 +85,8 @@ The FastAPI app exposes a programmatic surface for the core workflow:
 - `GET /jobs/{job_id}`
 - `POST /jobs/{job_id}/cancel`
 - `POST /suggest-tags`
+- `GET /workspaces`
+- `POST /workspaces`
 - `GET /sources`
 - `DELETE /sources/{source_id}`
 - `GET /stats`
@@ -134,6 +137,16 @@ That matters for long-lived libraries. It means sources can be re-embedded over 
 - `data/metadata.db` stores the relational metadata
 
 Collections are namespaced by workspace and embedding model. Source edits update both SQLite and Chroma so the UI and retrieval layer stay aligned.
+
+### Persistence
+
+SecondBrain is persistent as long as the `data/` directory is retained.
+
+- SQLite metadata lives in `data/metadata.db`
+- Chroma collections live in `data/chroma/`
+- queued file uploads use `data/job_uploads/`
+
+For local use, that means keeping the repository's `data/` folder. For Docker, it means mounting `./data` into the container so restarts do not wipe the knowledge base.
 
 ## Workspaces
 
@@ -418,6 +431,14 @@ Cancel a pending job immediately or request cancellation for a running job.
 
 Suggest tags for arbitrary text.
 
+### `GET /workspaces`
+
+List persisted workspaces.
+
+### `POST /workspaces`
+
+Create a workspace before any sources have been added to it.
+
 ### `GET /sources`
 
 List sources for a workspace.
@@ -432,7 +453,20 @@ Return API usage and cost information. Supports `workspace` as a query parameter
 
 ### `GET /health`
 
-Basic health check endpoint.
+Structured runtime validation for storage, API key presence, worker state, OCR availability, and persistence paths.
+
+## Validation and Troubleshooting
+
+The Streamlit UI includes a setup and validation panel in the Ingest tab, and the API exposes the same information through `GET /health`.
+
+Use that surface to confirm:
+
+- the SQLite metadata database is writable
+- the Chroma directory is writable
+- the background job upload directory exists
+- the Anthropic API key is configured
+- the embedded worker is online or intentionally disabled
+- OCR support is fully available or only partially installed
 
 ## Project Structure
 
