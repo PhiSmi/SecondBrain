@@ -9,6 +9,12 @@ Supports:
 - Source summarisation
 - Streaming responses
 - Configurable similarity threshold
+- HyDE (Hypothetical Document Embeddings)
+- Query decomposition for complex questions
+- Contextual compression of retrieved chunks
+- Follow-up question suggestions
+- Related sources discovery
+- Smart workspace digest
 """
 
 from __future__ import annotations
@@ -334,18 +340,33 @@ def ask(
     min_similarity: float = 0.0,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    use_hyde: bool = False,
+    use_decompose: bool = False,
+    use_compress: bool = False,
 ) -> dict:
     """Full RAG pipeline. Returns {answer, sources, history}."""
     ui_cfg = config.ui("ask")
     final_k = _retrieval_setting("final_k", 5)
-    chunks = retrieve(
-        question,
-        tags=tags,
-        hybrid=hybrid,
-        min_similarity=min_similarity,
-        workspace=workspace,
-        embed_model_id=embed_model_id,
-    )
+
+    # Choose retrieval strategy
+    if use_decompose:
+        chunks = multi_query_retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id,
+        )
+    elif use_hyde:
+        chunks = hyde_retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id, model_id=model_id,
+        )
+    else:
+        chunks = retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id,
+        )
 
     if not chunks:
         return {
@@ -359,6 +380,10 @@ def ask(
         chunks = rerank(question, chunks, top_n=final_k)
     else:
         chunks = chunks[:final_k]
+
+    # Contextual compression
+    if use_compress:
+        chunks = compress_chunks(question, chunks, workspace=workspace or "default")
 
     context, sources = _build_context(chunks)
 
@@ -396,18 +421,33 @@ def ask_stream(
     min_similarity: float = 0.0,
     workspace: str | None = None,
     embed_model_id: str | None = None,
+    use_hyde: bool = False,
+    use_decompose: bool = False,
+    use_compress: bool = False,
 ):
     """Streaming version of ask(). Yields (token, sources, updated_history) tuples."""
     ui_cfg = config.ui("ask")
     final_k = _retrieval_setting("final_k", 5)
-    chunks = retrieve(
-        question,
-        tags=tags,
-        hybrid=hybrid,
-        min_similarity=min_similarity,
-        workspace=workspace,
-        embed_model_id=embed_model_id,
-    )
+
+    # Choose retrieval strategy
+    if use_decompose:
+        chunks = multi_query_retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id,
+        )
+    elif use_hyde:
+        chunks = hyde_retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id, model_id=model_id,
+        )
+    else:
+        chunks = retrieve(
+            question, tags=tags, hybrid=hybrid,
+            min_similarity=min_similarity, workspace=workspace,
+            embed_model_id=embed_model_id,
+        )
 
     if not chunks:
         yield (
@@ -422,6 +462,10 @@ def ask_stream(
         chunks = rerank(question, chunks, top_n=final_k)
     else:
         chunks = chunks[:final_k]
+
+    # Contextual compression
+    if use_compress:
+        chunks = compress_chunks(question, chunks, workspace=workspace or "default")
 
     context, sources = _build_context(chunks)
 
@@ -544,3 +588,386 @@ def _track_api_usage(
         cost_usd=cost,
         workspace=workspace,
     )
+
+
+# ---------------------------------------------------------------------------
+# HyDE — Hypothetical Document Embeddings
+# ---------------------------------------------------------------------------
+
+HYDE_PROMPT = """You are a research assistant. Given a question, write a short paragraph (3-5 sentences)
+that would be the ideal passage in a knowledge base to answer this question.
+Write it as if it's an excerpt from a document, not as an answer to the question.
+Do NOT include any preamble — just the hypothetical passage."""
+
+
+def hyde_retrieve(
+    question: str,
+    top_k: int | None = None,
+    tags: list[str] | None = None,
+    hybrid: bool = True,
+    min_similarity: float = 0.0,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
+    model_id: str | None = None,
+) -> list[dict]:
+    """HyDE: Generate a hypothetical answer, embed it, and use that for retrieval.
+
+    This often outperforms direct query embedding because the hypothetical document
+    is closer in embedding space to actual relevant documents.
+    """
+    client = _get_anthropic()
+    used_model = model_id or "claude-haiku-4-5-20251001"
+    response = client.messages.create(
+        model=used_model,
+        max_tokens=256,
+        system=HYDE_PROMPT,
+        messages=[{"role": "user", "content": question}],
+    )
+    hypothetical_doc = response.content[0].text
+    _track_api_usage(response.usage, used_model, "hyde", workspace=workspace or "default")
+
+    # Now retrieve using the hypothetical document as the query
+    return retrieve(
+        hypothetical_doc,
+        top_k=top_k,
+        tags=tags,
+        hybrid=hybrid,
+        min_similarity=min_similarity,
+        workspace=workspace,
+        embed_model_id=embed_model_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Query Decomposition
+# ---------------------------------------------------------------------------
+
+DECOMPOSE_PROMPT = """You are a research assistant. Break this complex question into 2-4 simpler sub-questions
+that, when answered together, would fully address the original question.
+Return ONLY a JSON array of strings, nothing else.
+Example: ["What is X?", "How does X relate to Y?", "What are the implications?"]"""
+
+
+def decompose_query(question: str, workspace: str = "default") -> list[str]:
+    """Break a complex question into simpler sub-questions."""
+    client = _get_anthropic()
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        system=DECOMPOSE_PROMPT,
+        messages=[{"role": "user", "content": question}],
+    )
+    _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "decompose", workspace=workspace)
+    import json as _json
+    try:
+        raw = response.content[0].text.strip()
+        # Extract JSON array even if wrapped in markdown
+        if "```" in raw:
+            raw = raw.split("```")[1].strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+        return _json.loads(raw)
+    except Exception:
+        return [question]
+
+
+def multi_query_retrieve(
+    question: str,
+    top_k: int | None = None,
+    tags: list[str] | None = None,
+    hybrid: bool = True,
+    min_similarity: float = 0.0,
+    workspace: str | None = None,
+    embed_model_id: str | None = None,
+) -> list[dict]:
+    """Decompose a question into sub-queries, retrieve for each, and merge via RRF."""
+    sub_questions = decompose_query(question, workspace=workspace or "default")
+
+    all_chunks: dict[str, dict] = {}
+    ranked_lists: list[list[str]] = []
+
+    for sq in sub_questions:
+        chunks = retrieve(
+            sq,
+            top_k=top_k,
+            tags=tags,
+            hybrid=hybrid,
+            min_similarity=min_similarity,
+            workspace=workspace,
+            embed_model_id=embed_model_id,
+        )
+        ranked_ids = []
+        for c in chunks:
+            all_chunks[c["id"]] = c
+            ranked_ids.append(c["id"])
+        ranked_lists.append(ranked_ids)
+
+    merged_ids = _rrf_merge(ranked_lists)
+    top_k_val = top_k if top_k is not None else _retrieval_setting("top_k", 10)
+    return [all_chunks[cid] for cid in merged_ids[:top_k_val] if cid in all_chunks]
+
+
+# ---------------------------------------------------------------------------
+# Contextual Compression
+# ---------------------------------------------------------------------------
+
+COMPRESS_PROMPT = """Extract ONLY the parts of the following passage that are relevant to answering the question.
+If nothing is relevant, respond with "NOT_RELEVANT".
+Do not add any commentary — return only the extracted relevant text.
+
+Question: {question}
+
+Passage:
+{passage}"""
+
+
+def compress_chunks(question: str, chunks: list[dict], workspace: str = "default") -> list[dict]:
+    """Use Claude to extract only the relevant portions of each chunk."""
+    client = _get_anthropic()
+    compressed = []
+
+    for chunk in chunks:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": COMPRESS_PROMPT.format(question=question, passage=chunk["text"]),
+            }],
+        )
+        _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "compress", workspace=workspace)
+        extracted = response.content[0].text.strip()
+        if extracted and extracted != "NOT_RELEVANT":
+            compressed_chunk = dict(chunk)
+            compressed_chunk["original_text"] = chunk["text"]
+            compressed_chunk["text"] = extracted
+            compressed.append(compressed_chunk)
+
+    return compressed if compressed else chunks[:3]
+
+
+# ---------------------------------------------------------------------------
+# Follow-up Question Suggestions
+# ---------------------------------------------------------------------------
+
+FOLLOWUP_PROMPT = """Based on the question and answer below, suggest exactly 3 follow-up questions
+the user might want to ask next. The questions should explore different angles or go deeper.
+Return ONLY a JSON array of 3 strings, nothing else.
+
+Question: {question}
+Answer: {answer}"""
+
+
+def suggest_followups(
+    question: str,
+    answer: str,
+    workspace: str = "default",
+) -> list[str]:
+    """Generate follow-up question suggestions based on the Q&A."""
+    client = _get_anthropic()
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{
+            "role": "user",
+            "content": FOLLOWUP_PROMPT.format(question=question, answer=answer),
+        }],
+    )
+    _track_api_usage(response.usage, "claude-haiku-4-5-20251001", "followup", workspace=workspace)
+    import json as _json
+    try:
+        raw = response.content[0].text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+        return _json.loads(raw)
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Related Sources Discovery
+# ---------------------------------------------------------------------------
+
+def find_related_sources(
+    source_id: int,
+    top_n: int = 5,
+    workspace: str | None = None,
+) -> list[dict]:
+    """Find sources most similar to a given source by comparing their embeddings."""
+    import numpy as np
+
+    source = db.get_source(source_id)
+    if not source:
+        return []
+
+    model_id = source.get("embedding_model") or _default_embed_model_id()
+    collection = _get_collection(workspace or source.get("workspace"), model_id)
+
+    source_chunks = db.get_chunks_for_source(source_id)
+    if not source_chunks:
+        return []
+
+    # Get the source's centroid embedding
+    chroma_ids = [c["chroma_id"] for c in source_chunks]
+    try:
+        data = collection.get(ids=chroma_ids, include=["embeddings"])
+        if not data["embeddings"]:
+            return []
+        centroid = np.mean(data["embeddings"], axis=0).tolist()
+    except Exception:
+        return []
+
+    # Query collection with the centroid
+    total = collection.count()
+    if total < 2:
+        return []
+
+    results = collection.query(
+        query_embeddings=[centroid],
+        n_results=min(total, 50),
+        include=["metadatas", "distances"],
+    )
+
+    # Aggregate scores by source
+    source_scores: dict[int, list[float]] = {}
+    source_meta: dict[int, dict] = {}
+    for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+        sid = meta.get("source_id")
+        if sid == source_id or sid is None:
+            continue
+        sid = int(sid)
+        score = round(1 - dist, 3)
+        source_scores.setdefault(sid, []).append(score)
+        source_meta[sid] = meta
+
+    ranked = []
+    for sid, scores in source_scores.items():
+        avg_score = sum(scores) / len(scores)
+        meta = source_meta[sid]
+        ranked.append({
+            "source_id": sid,
+            "title": meta.get("title", "Unknown"),
+            "url": meta.get("url", ""),
+            "similarity": round(avg_score, 3),
+            "matching_chunks": len(scores),
+        })
+
+    ranked.sort(key=lambda x: x["similarity"], reverse=True)
+    return ranked[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# Smart Workspace Digest
+# ---------------------------------------------------------------------------
+
+DIGEST_PROMPT = """You are a research assistant. Given the following titles and excerpts from a personal knowledge base,
+write a concise digest (5-8 bullet points) covering:
+- Key themes and topics
+- Notable connections between sources
+- Knowledge gaps worth filling
+
+Be specific and reference source titles. Do not add any preamble."""
+
+
+def workspace_digest(workspace: str = "default", max_sources: int = 30) -> str:
+    """Generate a smart summary/digest of the workspace's content."""
+    sources = db.get_all_sources(workspace=workspace)
+    if not sources:
+        return "No sources in this workspace yet."
+
+    snippets = []
+    for src in sources[:max_sources]:
+        preview = db.get_chunk_preview_for_source(src["id"]).strip()[:200]
+        tags = ", ".join(src.get("tags") or [])
+        snippets.append(f"**{src['title']}** [{src['source_type']}] {f'Tags: {tags}' if tags else ''}\n{preview}")
+
+    combined = "\n\n---\n\n".join(snippets)
+    client = _get_anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=600,
+        system=DIGEST_PROMPT,
+        messages=[{"role": "user", "content": combined}],
+    )
+    _track_api_usage(response.usage, "claude-sonnet-4-20250514", "digest", workspace=workspace)
+    return response.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Image Analysis (via Claude Vision)
+# ---------------------------------------------------------------------------
+
+IMAGE_ANALYSIS_PROMPT = """Analyse this image thoroughly. Extract all text, describe diagrams/charts,
+and explain the content in detail. Structure your output as clean text that could be stored
+in a knowledge base for later retrieval. Be comprehensive but concise."""
+
+
+def analyse_image(image_bytes: bytes, media_type: str = "image/png") -> str:
+    """Use Claude Vision to extract text and content from an image."""
+    import base64
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    client = _get_anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": b64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": IMAGE_ANALYSIS_PROMPT,
+                },
+            ],
+        }],
+    )
+    _track_api_usage(response.usage, "claude-sonnet-4-20250514", "image-analysis", workspace="default")
+    return response.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Semantic Source Search
+# ---------------------------------------------------------------------------
+
+def semantic_source_search(
+    query_text: str,
+    workspace: str | None = None,
+    top_n: int = 10,
+) -> list[dict]:
+    """Search sources by semantic similarity to a query (not chunks — aggregated by source)."""
+    chunks = retrieve(query_text, top_k=30, hybrid=True, workspace=workspace)
+    source_scores: dict[int, list[float]] = {}
+    source_meta: dict[int, dict] = {}
+
+    for chunk in chunks:
+        sid = chunk["metadata"].get("source_id")
+        if sid is None:
+            continue
+        sid = int(sid)
+        score = chunk.get("semantic_score", 0)
+        source_scores.setdefault(sid, []).append(score)
+        source_meta[sid] = chunk["metadata"]
+
+    ranked = []
+    for sid, scores in source_scores.items():
+        avg = sum(scores) / len(scores)
+        meta = source_meta[sid]
+        ranked.append({
+            "source_id": sid,
+            "title": meta.get("title", "Unknown"),
+            "url": meta.get("url", ""),
+            "relevance": round(avg, 3),
+            "matching_chunks": len(scores),
+        })
+
+    ranked.sort(key=lambda x: x["relevance"], reverse=True)
+    return ranked[:top_n]

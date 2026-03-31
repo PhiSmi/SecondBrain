@@ -293,6 +293,62 @@ _css = f"""
 code {{
     font-family: 'IBM Plex Mono', monospace !important;
 }}
+
+/* Follow-up buttons */
+.stButton > button[kind="secondary"] {{
+    transition: all 0.2s ease;
+}}
+
+.stButton > button:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.15);
+}}
+
+/* Strategy badges animation */
+.meta-pill {{
+    transition: all 0.2s ease;
+}}
+
+/* Discover tab cards */
+.discover-card {{
+    background: linear-gradient(180deg, rgba(12, 22, 39, 0.86) 0%, rgba(8, 16, 30, 0.94) 100%);
+    border: 1px solid {_theme["border_color"]};
+    border-radius: 16px;
+    padding: 1rem;
+    margin-bottom: 0.7rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}}
+
+/* Smooth chat messages */
+[data-testid="stChatMessage"] {{
+    border-radius: 16px;
+    border: 1px solid {_theme["border_color"]};
+    margin-bottom: 0.5rem;
+}}
+
+/* Better expander styling */
+details[data-testid="stExpander"] {{
+    border-radius: 16px;
+    border: 1px solid {_theme["border_color"]};
+    overflow: hidden;
+}}
+
+/* Progress bar theming */
+.stProgress > div > div > div {{
+    background: linear-gradient(90deg, {_theme["primary_color"]}, {_theme["secondary_color"]});
+    border-radius: 8px;
+}}
+
+/* Toggle switches */
+.stToggle label {{
+    font-size: 0.88rem;
+}}
+
+/* Chart container */
+[data-testid="stVegaLiteChart"] {{
+    border-radius: 12px;
+    overflow: hidden;
+}}
 </style>
 """
 st.markdown(_css, unsafe_allow_html=True)
@@ -648,8 +704,8 @@ st.markdown(
 # Tabs
 # ---------------------------------------------------------------------------
 _ui = config.ui()
-tab_ingest, tab_ask, tab_history, tab_sources, tab_rss, tab_analytics, tab_eval = st.tabs(
-    ["📥 Ingest", "💬 Ask", "📜 History", "📚 Sources", "📡 RSS Feeds", "📊 Analytics", "🧪 Eval"]
+tab_ingest, tab_ask, tab_history, tab_sources, tab_discover, tab_rss, tab_analytics, tab_eval = st.tabs(
+    ["📥 Ingest", "💬 Ask", "📜 History", "📚 Sources", "🔗 Discover", "📡 RSS Feeds", "📊 Analytics", "🧪 Eval"]
 )
 
 
@@ -885,6 +941,44 @@ with tab_ingest:
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
+    elif input_type == "Image":
+        st.caption("Upload an image — Claude Vision will extract text, describe diagrams, and analyse the content.")
+        uploaded_img = st.file_uploader("Upload an image",
+                                        type=["png", "jpg", "jpeg", "gif", "webp"],
+                                        help="Supported: PNG, JPG, GIF, WebP")
+        title = st.text_input("Title", placeholder="e.g. Architecture Diagram — Auth Flow", key="img_title")
+        tags = _tag_input("tags_img")
+        if st.button("Analyse & Ingest", type="primary"):
+            if uploaded_img is None:
+                st.error("Please upload an image.")
+            elif not title.strip():
+                st.error("Please provide a title.")
+            else:
+                img_bytes = uploaded_img.read()
+                # Determine media type
+                ext = uploaded_img.name.rsplit(".", 1)[-1].lower() if "." in uploaded_img.name else "png"
+                media_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                             "gif": "image/gif", "webp": "image/webp"}
+                media_type = media_map.get(ext, "image/png")
+                with st.spinner("Analysing image with Claude Vision..."):
+                    extracted_text = query.analyse_image(img_bytes, media_type=media_type)
+                st.markdown("**Extracted content preview:**")
+                st.markdown(extracted_text[:500] + ("..." if len(extracted_text) > 500 else ""))
+                with st.spinner("Chunking and embedding..."):
+                    effective_tags = tags
+                    if use_autotag and not effective_tags:
+                        effective_tags = query.suggest_tags(extracted_text, workspace=active_workspace)
+                    n = ingest.ingest_text(
+                        extracted_text,
+                        title=title.strip(),
+                        source_type="image",
+                        tags=effective_tags,
+                        workspace=active_workspace,
+                        embed_model_id=embed_model_id,
+                    )
+                st.success(f"Ingested **{n}** chunks from image analysis."
+                           + (f" Tags: {', '.join(effective_tags)}." if effective_tags else ""))
+
     else:  # Bulk URLs
         urls_raw = st.text_area("URLs (one per line)", height=200,
                                 placeholder=_ingest_cfg.get("bulk_placeholder", ""))
@@ -1068,19 +1162,34 @@ with tab_ask:
             use_rerank = st.toggle(_ask_cfg.get("rerank_label", "Reranking"),
                                    value=config.retrieval().get("default_rerank", False),
                                    help=_ask_cfg.get("rerank_help", ""))
+            use_streaming = st.toggle(_ask_cfg.get("stream_label", "Stream response"),
+                                      value=config.retrieval().get("default_stream", True))
         with col2:
+            use_hyde = st.toggle(_ask_cfg.get("hyde_label", "HyDE retrieval"),
+                                 value=config.retrieval().get("default_hyde", False),
+                                 help=_ask_cfg.get("hyde_help", ""))
+            use_decompose = st.toggle(_ask_cfg.get("decompose_label", "Query decomposition"),
+                                      value=config.retrieval().get("default_decompose", False),
+                                      help=_ask_cfg.get("decompose_help", ""))
+            use_compress = st.toggle(_ask_cfg.get("compress_label", "Contextual compression"),
+                                     value=config.retrieval().get("default_compress", False),
+                                     help=_ask_cfg.get("compress_help", ""))
+        with col3:
             all_tags = db.get_all_tags(workspace=active_workspace)
             selected_tags = st.multiselect("Filter by tags", options=all_tags)
             min_sim = st.slider(_ask_cfg.get("threshold_label", "Min similarity"),
                                 0.0, 1.0, config.retrieval().get("min_similarity", 0.0), 0.05)
-        with col3:
+        col4, col5 = st.columns(2)
+        with col4:
             llm_models = config.models("llm")
             llm_names = [m["name"] for m in llm_models]
             default_llm = next((i for i, m in enumerate(llm_models) if m.get("default")), 0)
             model_choice = st.selectbox(_ask_cfg.get("model_label", "Claude model"), llm_names, index=default_llm)
             model_id = llm_models[llm_names.index(model_choice)]["id"]
-            use_streaming = st.toggle(_ask_cfg.get("stream_label", "Stream response"),
-                                      value=config.retrieval().get("default_stream", True))
+        with col5:
+            use_followups = st.toggle("Suggest follow-ups",
+                                      value=config.retrieval().get("default_followups", True),
+                                      help="Generate follow-up question suggestions after each answer")
 
     # Form so pressing Enter submits the question
     with st.form("ask_form", clear_on_submit=False):
@@ -1105,15 +1214,40 @@ with tab_ask:
         st.session_state["chat_history"] = []
 
     if ask_clicked and question.strip():
+        # Show active retrieval strategy badges
+        active_strategies = []
+        if use_hybrid:
+            active_strategies.append("Hybrid")
+        if use_hyde:
+            active_strategies.append("HyDE")
+        if use_decompose:
+            active_strategies.append("Decompose")
+        if use_rerank:
+            active_strategies.append("Rerank")
+        if use_compress:
+            active_strategies.append("Compress")
+        if active_strategies:
+            st.markdown(
+                _render_badges([f"⚡ {s}" for s in active_strategies]),
+                unsafe_allow_html=True,
+            )
+
         if use_streaming:
             sources = []
             answer_placeholder = st.empty()
             full_answer = ""
             final_history = None
-            with st.spinner("Retrieving..."):
+            with st.spinner("Retrieving..." + (" (HyDE)" if use_hyde else "") + (" (Decomposing)" if use_decompose else "")):
+                # Advanced retrieval pre-processing
+                if use_decompose:
+                    sub_qs = query.decompose_query(question.strip(), workspace=active_workspace)
+                    if len(sub_qs) > 1:
+                        st.caption(f"Decomposed into {len(sub_qs)} sub-queries: {', '.join(sub_qs)}")
+
                 stream = query.ask_stream(question.strip(), history=st.session_state["chat_history"],
                                           tags=selected_tags or None, use_rerank=use_rerank, hybrid=use_hybrid,
-                                          model_id=model_id, min_similarity=min_sim, workspace=active_workspace)
+                                          model_id=model_id, min_similarity=min_sim, workspace=active_workspace,
+                                          use_hyde=use_hyde, use_decompose=use_decompose, use_compress=use_compress)
                 first = True
                 for token, srcs, updated in stream:
                     if first:
@@ -1139,7 +1273,8 @@ with tab_ask:
             with st.spinner("Searching..."):
                 result = query.ask(question.strip(), history=st.session_state["chat_history"],
                                    tags=selected_tags or None, use_rerank=use_rerank, hybrid=use_hybrid,
-                                   model_id=model_id, min_similarity=min_sim, workspace=active_workspace)
+                                   model_id=model_id, min_similarity=min_sim, workspace=active_workspace,
+                                   use_hyde=use_hyde, use_decompose=use_decompose, use_compress=use_compress)
             st.session_state["chat_history"] = result["history"]
             st.session_state["last_result"] = result
             st.session_state["last_question"] = question.strip()
@@ -1150,6 +1285,23 @@ with tab_ask:
                 selected_tags or [],
                 workspace=active_workspace,
             )
+
+        # Follow-up suggestions
+        if use_followups and st.session_state.get("last_result"):
+            last_q = st.session_state.get("last_question", "")
+            last_a = st.session_state["last_result"].get("answer", "")
+            if last_q and last_a and last_a != config.ui("ask").get("empty_kb_message", ""):
+                with st.spinner("Generating follow-ups..."):
+                    followups = query.suggest_followups(last_q, last_a, workspace=active_workspace)
+                if followups:
+                    st.markdown("**Suggested follow-ups:**")
+                    fup_cols = st.columns(len(followups))
+                    for idx, (col, fup) in enumerate(zip(fup_cols, followups)):
+                        with col:
+                            if st.button(f"💡 {fup}", key=f"followup_{idx}", use_container_width=True):
+                                st.session_state["reask_question"] = fup
+                                st.rerun()
+
     elif ask_clicked:
         st.warning("Please enter a question.")
 
@@ -1319,6 +1471,91 @@ with tab_sources:
 
 
 # ---------------------------------------------------------------------------
+# DISCOVER TAB
+# ---------------------------------------------------------------------------
+
+with tab_discover:
+    _discover_cfg = config.ui("discover") or {}
+    st.subheader(_discover_cfg.get("heading", "Discover Connections"))
+
+    discover_col1, discover_col2 = st.columns([1, 1])
+
+    with discover_col1:
+        st.markdown("#### 🧠 Workspace Digest")
+        st.caption(_discover_cfg.get("digest_caption",
+                                      "AI-generated summary of your knowledge base's key themes and connections."))
+        if st.button("Generate Digest", type="primary"):
+            with st.spinner("Analysing your knowledge base..."):
+                digest = query.workspace_digest(workspace=active_workspace)
+            st.markdown(digest)
+
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown("#### 🔍 Semantic Source Search")
+        st.caption("Find sources by meaning, not just keywords.")
+        sem_query = st.text_input("Search",
+                                  placeholder=_discover_cfg.get("semantic_search_placeholder", "Search sources by meaning..."),
+                                  key="sem_src_search")
+        if sem_query.strip():
+            with st.spinner("Searching..."):
+                sem_results = query.semantic_source_search(sem_query.strip(), workspace=active_workspace)
+            if sem_results:
+                for r in sem_results:
+                    relevance_pct = f"{r['relevance']:.0%}"
+                    st.markdown(
+                        f"**{r['title']}** — {relevance_pct} relevant ({r['matching_chunks']} matching chunks)"
+                    )
+                    if r.get("url"):
+                        st.caption(r["url"])
+            else:
+                st.info("No matching sources found.")
+
+    with discover_col2:
+        st.markdown("#### 🔗 Related Sources")
+        st.caption("Select a source to find related content in your knowledge base.")
+        all_sources = db.get_all_sources(workspace=active_workspace)
+        if all_sources:
+            source_titles = {s["id"]: s["title"] for s in all_sources}
+            selected_source_id = st.selectbox(
+                "Source",
+                options=list(source_titles.keys()),
+                format_func=lambda sid: source_titles.get(sid, f"Source #{sid}"),
+                key="related_source_picker",
+            )
+            if st.button("Find Related"):
+                with st.spinner("Computing similarity..."):
+                    related = query.find_related_sources(
+                        selected_source_id, workspace=active_workspace
+                    )
+                if related:
+                    for r in related:
+                        sim_pct = f"{r['similarity']:.0%}"
+                        st.markdown(
+                            f"**{r['title']}** — {sim_pct} similar ({r['matching_chunks']} overlapping chunks)"
+                        )
+                        if r.get("url"):
+                            st.caption(r["url"])
+                else:
+                    st.info("No related sources found. Try ingesting more content.")
+        else:
+            st.info("No sources in this workspace yet.")
+
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown("#### 📈 Knowledge Coverage")
+        st.caption("Quick view of what your knowledge base covers.")
+        coverage_stats = db.get_stats(workspace=active_workspace)
+        if coverage_stats["tag_frequency"]:
+            # Show top tags as a visual indicator
+            top_tags = list(coverage_stats["tag_frequency"].items())[:10]
+            if top_tags:
+                mx = max(v for _, v in top_tags)
+                for tag, count in top_tags:
+                    pct = count / mx
+                    st.progress(pct, text=f"{tag} ({count})")
+        else:
+            st.caption("No tags yet. Tag your sources for better coverage visibility.")
+
+
+# ---------------------------------------------------------------------------
 # RSS FEEDS TAB
 # ---------------------------------------------------------------------------
 
@@ -1410,28 +1647,32 @@ with tab_analytics:
     with col_types:
         st.markdown("#### Sources by Type")
         if stats["type_breakdown"]:
-            for stype, count in stats["type_breakdown"].items():
-                pct = count / max(stats["source_count"], 1)
-                st.markdown(f"**{stype}** — {count} ({pct:.0%})")
-                st.progress(pct)
+            import pandas as pd
+            type_df = pd.DataFrame(
+                list(stats["type_breakdown"].items()),
+                columns=["Type", "Count"],
+            )
+            st.bar_chart(type_df, x="Type", y="Count", horizontal=True)
         else:
             st.caption("No sources yet.")
     with col_tags:
-        st.markdown("#### Tag Frequency")
+        st.markdown("#### Top Tags")
         if stats["tag_frequency"]:
-            mx = max(stats["tag_frequency"].values())
-            for tag, count in list(stats["tag_frequency"].items())[:15]:
-                st.markdown(f"**{tag}** — {count}")
-                st.progress(count / mx)
+            import pandas as pd
+            tag_items = list(stats["tag_frequency"].items())[:12]
+            tag_df = pd.DataFrame(tag_items, columns=["Tag", "Count"])
+            st.bar_chart(tag_df, x="Tag", y="Count")
         else:
             st.caption("No tags yet.")
     with col_models:
         st.markdown("#### Embedding Models")
         if model_breakdown:
-            mx = max(model_breakdown.values())
-            for model_name, count in sorted(model_breakdown.items(), key=lambda item: item[1], reverse=True):
-                st.markdown(f"**{model_name}** — {count}")
-                st.progress(count / mx)
+            import pandas as pd
+            model_df = pd.DataFrame(
+                sorted(model_breakdown.items(), key=lambda item: item[1], reverse=True),
+                columns=["Model", "Sources"],
+            )
+            st.bar_chart(model_df, x="Model", y="Sources")
         else:
             st.caption("No embeddings yet.")
 

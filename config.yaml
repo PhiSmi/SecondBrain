@@ -25,6 +25,7 @@ ui:
     - "Ask"
     - "History"
     - "Sources"
+    - "Discover"
     - "RSS Feeds"
     - "Analytics"
     - "Eval"
@@ -37,6 +38,7 @@ ui:
       - "URL"
       - "File upload"
       - "YouTube"
+      - "Image"
       - "Bulk URLs"
     paste_title_placeholder: "e.g. AWS Well-Architected — Reliability Pillar"
     paste_area_placeholder: "Paste content here"
@@ -62,12 +64,27 @@ ui:
     hybrid_help: "Combines keyword and semantic search for better recall"
     rerank_label: "Reranking"
     rerank_help: "Cross-encoder reranks retrieved chunks for higher precision. Uses extra ~85MB RAM."
+    hyde_label: "HyDE retrieval"
+    hyde_help: "Generate a hypothetical answer first, then search with it. Better for abstract or conceptual questions."
+    decompose_label: "Query decomposition"
+    decompose_help: "Break complex questions into sub-queries and merge results. Better for multi-part questions."
+    compress_label: "Contextual compression"
+    compress_help: "Use AI to extract only the relevant parts of each retrieved chunk. Reduces noise but adds latency."
     stream_label: "Stream response"
     stream_help: "Show the answer as it's generated, token by token"
     model_label: "Claude model"
     threshold_label: "Min similarity score"
     threshold_help: "Only include chunks above this relevance score (0.0–1.0)"
     empty_kb_message: "No content has been ingested yet. Add some text or URLs in the Ingest tab first."
+
+  # Discover tab
+  discover:
+    heading: "Discover Connections"
+    digest_heading: "Workspace Digest"
+    digest_caption: "AI-generated summary of your knowledge base's key themes and connections."
+    related_heading: "Related Sources"
+    semantic_search_heading: "Semantic Source Search"
+    semantic_search_placeholder: "Search sources by meaning..."
 
   # History tab
   history:
@@ -149,7 +166,11 @@ retrieval:
   rrf_k: 60                         # RRF merge constant
   default_hybrid: true               # hybrid search on by default
   default_rerank: false              # reranking off by default (saves RAM)
+  default_hyde: false                # HyDE retrieval off by default (adds latency)
+  default_decompose: false           # query decomposition off by default
+  default_compress: false            # contextual compression off by default
   default_stream: true               # streaming on by default
+  default_followups: true            # follow-up suggestions on by default
   min_similarity: 0.0                # default minimum similarity threshold
   dedup_threshold: 0.95              # cosine similarity threshold for duplicate detection
 
