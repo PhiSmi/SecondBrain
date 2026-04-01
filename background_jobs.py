@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -82,6 +84,60 @@ def embedded_worker_status() -> str:
     return "starting"
 
 
+def _queue_result(job_id: int, *, status: str = "pending", reused: bool = False) -> dict:
+    return {"job_id": job_id, "status": status, "reused": reused}
+
+
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    return sorted({tag.strip() for tag in tags or [] if tag and tag.strip()})
+
+
+def _dedupe_key(job_type: str, workspace: str, payload: dict) -> str:
+    normalized = {
+        "job_type": job_type,
+        "workspace": workspace,
+        **payload,
+    }
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _find_reusable_job(job_type: str, workspace: str, dedupe_key: str) -> dict | None:
+    for job in db.get_open_ingest_jobs(limit=50, workspace=workspace, job_type=job_type):
+        if job.get("payload", {}).get("dedupe_key") == dedupe_key:
+            return job
+    return None
+
+
+def _queue_job(
+    job_type: str,
+    *,
+    title: str,
+    workspace: str,
+    payload: dict,
+    progress_total: int,
+    progress_message: str = "Queued",
+    include_meta: bool = False,
+) -> int | dict:
+    ensure_worker_running()
+    dedupe_key = payload.get("dedupe_key")
+    if dedupe_key:
+        existing = _find_reusable_job(job_type, workspace, dedupe_key)
+        if existing:
+            response = _queue_result(existing["id"], status=existing["status"], reused=True)
+            return response if include_meta else existing["id"]
+    job_id = db.create_ingest_job(
+        job_type,
+        title=title,
+        workspace=workspace,
+        progress_total=progress_total,
+        progress_message=progress_message,
+        payload=payload,
+    )
+    response = _queue_result(job_id)
+    return response if include_meta else job_id
+
+
 def queue_text_ingest(
     text: str,
     title: str,
@@ -89,22 +145,34 @@ def queue_text_ingest(
     workspace: str = "default",
     embed_model_id: str | None = None,
     auto_tag: bool = False,
-) -> int:
-    ensure_worker_running()
-    return db.create_ingest_job(
+    include_meta: bool = False,
+) -> int | dict:
+    payload = {
+        "text": text,
+        "title": title,
+        "tags": tags or [],
+        "workspace": workspace,
+        "embed_model_id": embed_model_id,
+        "auto_tag": auto_tag,
+    }
+    payload["dedupe_key"] = _dedupe_key(
+        "text",
+        workspace,
+        {
+            "title": title,
+            "text_sha": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "tags": _normalize_tags(tags),
+            "embed_model_id": embed_model_id,
+            "auto_tag": auto_tag,
+        },
+    )
+    return _queue_job(
         "text",
         title=title,
         workspace=workspace,
         progress_total=DEFAULT_STAGE_TOTAL,
-        progress_message="Queued",
-        payload={
-            "text": text,
-            "title": title,
-            "tags": tags or [],
-            "workspace": workspace,
-            "embed_model_id": embed_model_id,
-            "auto_tag": auto_tag,
-        },
+        payload=payload,
+        include_meta=include_meta,
     )
 
 
@@ -115,23 +183,35 @@ def queue_url_ingest(
     workspace: str = "default",
     embed_model_id: str | None = None,
     auto_tag: bool = False,
-) -> int:
-    ensure_worker_running()
+    include_meta: bool = False,
+) -> int | dict:
     job_title = title or url
-    return db.create_ingest_job(
+    payload = {
+        "url": url,
+        "title": title,
+        "tags": tags or [],
+        "workspace": workspace,
+        "embed_model_id": embed_model_id,
+        "auto_tag": auto_tag,
+    }
+    payload["dedupe_key"] = _dedupe_key(
+        "url",
+        workspace,
+        {
+            "url": url.strip(),
+            "title": title or "",
+            "tags": _normalize_tags(tags),
+            "embed_model_id": embed_model_id,
+            "auto_tag": auto_tag,
+        },
+    )
+    return _queue_job(
         "url",
         title=job_title,
         workspace=workspace,
         progress_total=DEFAULT_STAGE_TOTAL,
-        progress_message="Queued",
-        payload={
-            "url": url,
-            "title": title,
-            "tags": tags or [],
-            "workspace": workspace,
-            "embed_model_id": embed_model_id,
-            "auto_tag": auto_tag,
-        },
+        payload=payload,
+        include_meta=include_meta,
     )
 
 
@@ -144,26 +224,47 @@ def queue_file_ingest(
     embed_model_id: str | None = None,
     ocr: bool = False,
     auto_tag: bool = False,
-) -> int:
-    ensure_worker_running()
+    include_meta: bool = False,
+) -> int | dict:
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    dedupe_key = _dedupe_key(
+        "file",
+        workspace,
+        {
+            "file_hash": file_hash,
+            "filename": filename,
+            "title": title,
+            "tags": _normalize_tags(tags),
+            "embed_model_id": embed_model_id,
+            "ocr": ocr,
+            "auto_tag": auto_tag,
+        },
+    )
+    existing = _find_reusable_job("file", workspace, dedupe_key)
+    if existing:
+        response = _queue_result(existing["id"], status=existing["status"], reused=True)
+        return response if include_meta else existing["id"]
     file_path = _write_upload(file_bytes, filename)
+    payload = {
+        "path": str(file_path),
+        "filename": filename,
+        "file_hash": file_hash,
+        "title": title,
+        "tags": tags or [],
+        "workspace": workspace,
+        "embed_model_id": embed_model_id,
+        "ocr": ocr,
+        "auto_tag": auto_tag,
+        "dedupe_key": dedupe_key,
+    }
     try:
-        return db.create_ingest_job(
+        return _queue_job(
             "file",
             title=title,
             workspace=workspace,
             progress_total=DEFAULT_STAGE_TOTAL,
-            progress_message="Queued",
-            payload={
-                "path": str(file_path),
-                "filename": filename,
-                "title": title,
-                "tags": tags or [],
-                "workspace": workspace,
-                "embed_model_id": embed_model_id,
-                "ocr": ocr,
-                "auto_tag": auto_tag,
-            },
+            payload=payload,
+            include_meta=include_meta,
         )
     except Exception:
         file_path.unlink(missing_ok=True)
@@ -177,23 +278,35 @@ def queue_youtube_ingest(
     workspace: str = "default",
     embed_model_id: str | None = None,
     auto_tag: bool = False,
-) -> int:
-    ensure_worker_running()
+    include_meta: bool = False,
+) -> int | dict:
     job_title = title or url
-    return db.create_ingest_job(
+    payload = {
+        "url": url,
+        "title": title,
+        "tags": tags or [],
+        "workspace": workspace,
+        "embed_model_id": embed_model_id,
+        "auto_tag": auto_tag,
+    }
+    payload["dedupe_key"] = _dedupe_key(
+        "youtube",
+        workspace,
+        {
+            "url": url.strip(),
+            "title": title or "",
+            "tags": _normalize_tags(tags),
+            "embed_model_id": embed_model_id,
+            "auto_tag": auto_tag,
+        },
+    )
+    return _queue_job(
         "youtube",
         title=job_title,
         workspace=workspace,
         progress_total=DEFAULT_STAGE_TOTAL,
-        progress_message="Queued",
-        payload={
-            "url": url,
-            "title": title,
-            "tags": tags or [],
-            "workspace": workspace,
-            "embed_model_id": embed_model_id,
-            "auto_tag": auto_tag,
-        },
+        payload=payload,
+        include_meta=include_meta,
     )
 
 
@@ -203,24 +316,35 @@ def queue_bulk_url_ingest(
     workspace: str = "default",
     embed_model_id: str | None = None,
     auto_tag: bool = False,
-) -> int:
+    include_meta: bool = False,
+) -> int | dict:
     clean_urls = [url.strip() for url in urls if url.strip()]
     if not clean_urls:
         raise ValueError("At least one URL is required")
-    ensure_worker_running()
-    return db.create_ingest_job(
+    payload = {
+        "urls": clean_urls,
+        "tags": tags or [],
+        "workspace": workspace,
+        "embed_model_id": embed_model_id,
+        "auto_tag": auto_tag,
+    }
+    payload["dedupe_key"] = _dedupe_key(
+        "bulk_urls",
+        workspace,
+        {
+            "urls": clean_urls,
+            "tags": _normalize_tags(tags),
+            "embed_model_id": embed_model_id,
+            "auto_tag": auto_tag,
+        },
+    )
+    return _queue_job(
         "bulk_urls",
         title=f"Bulk URL ingest ({len(clean_urls)} URLs)",
         workspace=workspace,
         progress_total=len(clean_urls),
-        progress_message="Queued",
-        payload={
-            "urls": clean_urls,
-            "tags": tags or [],
-            "workspace": workspace,
-            "embed_model_id": embed_model_id,
-            "auto_tag": auto_tag,
-        },
+        payload=payload,
+        include_meta=include_meta,
     )
 
 
@@ -237,9 +361,78 @@ def cancel_job(job_id: int) -> str | None:
     if job is None:
         return None
     status = db.cancel_ingest_job(job_id)
-    if status == "cancelled":
+    if status == "cancelled" and job["job_type"] != "file":
         _cleanup_job_artifacts(job)
     return status
+
+
+def retry_job(job_id: int) -> dict | None:
+    job = db.get_ingest_job(job_id)
+    if job is None or job["status"] not in {"failed", "cancelled"}:
+        return None
+    payload = job["payload"]
+    if job["job_type"] == "text":
+        return queue_text_ingest(
+            payload.get("text", ""),
+            title=payload.get("title") or job["title"],
+            tags=payload.get("tags"),
+            workspace=payload.get("workspace") or job["workspace"],
+            embed_model_id=payload.get("embed_model_id"),
+            auto_tag=payload.get("auto_tag", False),
+            include_meta=True,
+        )
+    if job["job_type"] == "url":
+        return queue_url_ingest(
+            payload["url"],
+            title=payload.get("title"),
+            tags=payload.get("tags"),
+            workspace=payload.get("workspace") or job["workspace"],
+            embed_model_id=payload.get("embed_model_id"),
+            auto_tag=payload.get("auto_tag", False),
+            include_meta=True,
+        )
+    if job["job_type"] == "youtube":
+        return queue_youtube_ingest(
+            payload["url"],
+            title=payload.get("title"),
+            tags=payload.get("tags"),
+            workspace=payload.get("workspace") or job["workspace"],
+            embed_model_id=payload.get("embed_model_id"),
+            auto_tag=payload.get("auto_tag", False),
+            include_meta=True,
+        )
+    if job["job_type"] == "bulk_urls":
+        return queue_bulk_url_ingest(
+            payload.get("urls", []),
+            tags=payload.get("tags"),
+            workspace=payload.get("workspace") or job["workspace"],
+            embed_model_id=payload.get("embed_model_id"),
+            auto_tag=payload.get("auto_tag", False),
+            include_meta=True,
+        )
+    if job["job_type"] == "file":
+        path = payload.get("path")
+        if not path or not Path(path).exists():
+            return None
+        return queue_file_ingest(
+            Path(path).read_bytes(),
+            payload.get("filename") or Path(path).name,
+            title=payload.get("title") or job["title"],
+            tags=payload.get("tags"),
+            workspace=payload.get("workspace") or job["workspace"],
+            embed_model_id=payload.get("embed_model_id"),
+            ocr=payload.get("ocr", False),
+            auto_tag=payload.get("auto_tag", False),
+            include_meta=True,
+        )
+    return None
+
+
+def clear_jobs(workspace: str | None = None, statuses: set[str] | None = None) -> int:
+    deleted_jobs = db.delete_ingest_jobs(statuses or {"succeeded", "cancelled", "failed"}, workspace=workspace)
+    for job in deleted_jobs:
+        _cleanup_job_artifacts(job)
+    return len(deleted_jobs)
 
 
 def process_next_job(worker_id: str | None = None) -> dict | None:
@@ -250,18 +443,21 @@ def process_next_job(worker_id: str | None = None) -> dict | None:
 
     try:
         result = _process_job(job)
+        preserve_artifacts = False
     except JobCancelled:
         logger.info("Background ingest job %s cancelled", job["id"])
         db.mark_ingest_job_cancelled(job["id"], active_worker_id)
         result = None
+        preserve_artifacts = job["job_type"] == "file"
     except Exception as exc:
         logger.exception("Background ingest job %s failed", job["id"])
         db.fail_ingest_job(job["id"], str(exc))
         result = None
+        preserve_artifacts = job["job_type"] == "file"
     else:
         db.complete_ingest_job(job["id"], result)
     finally:
-        _cleanup_job_artifacts(job)
+        _cleanup_job_artifacts(job, preserve_upload=preserve_artifacts)
 
     return db.get_ingest_job(job["id"])
 
@@ -383,6 +579,8 @@ def _process_job(job: dict) -> dict:
     if job["job_type"] == "bulk_urls":
         results = []
         total_urls = len(payload.get("urls", []))
+        running_result = {"total_urls": total_urls, "succeeded": 0, "failed": 0, "results": []}
+        _set_job_result(job, running_result)
         for idx, url in enumerate(payload.get("urls", []), 1):
             _set_job_progress(job, idx - 1, f"Fetching {url}")
             try:
@@ -399,15 +597,26 @@ def _process_job(job: dict) -> dict:
                     workspace,
                     use_stage_progress=False,
                 )
-                results.append({"url": url, "chunks": result["chunks"], "warning": result["warning"]})
+                item_result = {"url": url, "chunks": result["chunks"], "warning": result["warning"]}
+                results.append(item_result)
             except JobCancelled:
                 raise
             except Exception as exc:
-                results.append({"url": url, "error": str(exc)})
+                item_result = {"url": url, "error": str(exc)}
+                results.append(item_result)
             finally:
+                running_result["results"] = list(results)
+                running_result["succeeded"] = sum(1 for result in results if not result.get("error"))
+                running_result["failed"] = sum(1 for result in results if result.get("error"))
+                _set_job_result(job, running_result)
                 _set_job_progress(job, idx, f"Processed {idx} of {total_urls} URLs")
         succeeded = sum(1 for result in results if not result.get("error"))
-        return {"total_urls": total_urls, "succeeded": succeeded, "results": results}
+        return {
+            "total_urls": total_urls,
+            "succeeded": succeeded,
+            "failed": total_urls - succeeded,
+            "results": results,
+        }
 
     raise ValueError(f"Unsupported background ingest job type: {job['job_type']}")
 
@@ -485,6 +694,17 @@ def _set_job_progress(job: dict, current: int, message: str) -> None:
     job["progress_message"] = message
 
 
+def _set_job_result(job: dict, result: dict) -> None:
+    _ensure_not_cancelled(job)
+    db.update_ingest_job_result(
+        job["id"],
+        job["worker_id"],
+        result,
+        lease_seconds=_lease_seconds(),
+    )
+    job["result"] = result
+
+
 def _ensure_not_cancelled(job: dict) -> None:
     if db.is_ingest_job_cancelling(job["id"], job["worker_id"]):
         raise JobCancelled()
@@ -499,8 +719,10 @@ def _write_upload(file_bytes: bytes, filename: str) -> Path:
     return path
 
 
-def _cleanup_job_artifacts(job: dict) -> None:
+def _cleanup_job_artifacts(job: dict, preserve_upload: bool = False) -> None:
     if job["job_type"] != "file":
+        return
+    if preserve_upload:
         return
     path = job["payload"].get("path")
     if not path:

@@ -88,6 +88,7 @@ class IngestResponse(BaseModel):
 class JobQueuedResponse(BaseModel):
     job_id: int
     status: str
+    reused: bool = False
 
 
 class TagSuggestRequest(BaseModel):
@@ -161,53 +162,57 @@ def api_ingest_url(req: IngestURLRequest):
 
 @app.post("/jobs/ingest/text", response_model=JobQueuedResponse)
 def api_queue_ingest_text(req: IngestTextRequest):
-    job_id = background_jobs.queue_text_ingest(
+    queued = background_jobs.queue_text_ingest(
         req.text,
         title=req.title,
         tags=req.tags,
         workspace=req.workspace or "default",
         embed_model_id=req.embed_model_id,
         auto_tag=req.auto_tag,
+        include_meta=True,
     )
-    return JobQueuedResponse(job_id=job_id, status="pending")
+    return JobQueuedResponse(**queued)
 
 
 @app.post("/jobs/ingest/url", response_model=JobQueuedResponse)
 def api_queue_ingest_url(req: IngestURLRequest):
-    job_id = background_jobs.queue_url_ingest(
+    queued = background_jobs.queue_url_ingest(
         req.url,
         title=req.title,
         tags=req.tags,
         workspace=req.workspace or "default",
         embed_model_id=req.embed_model_id,
         auto_tag=req.auto_tag,
+        include_meta=True,
     )
-    return JobQueuedResponse(job_id=job_id, status="pending")
+    return JobQueuedResponse(**queued)
 
 
 @app.post("/jobs/ingest/youtube", response_model=JobQueuedResponse)
 def api_queue_ingest_youtube(req: IngestYouTubeRequest):
-    job_id = background_jobs.queue_youtube_ingest(
+    queued = background_jobs.queue_youtube_ingest(
         req.url,
         title=req.title,
         tags=req.tags,
         workspace=req.workspace or "default",
         embed_model_id=req.embed_model_id,
         auto_tag=req.auto_tag,
+        include_meta=True,
     )
-    return JobQueuedResponse(job_id=job_id, status="pending")
+    return JobQueuedResponse(**queued)
 
 
 @app.post("/jobs/ingest/bulk-urls", response_model=JobQueuedResponse)
 def api_queue_ingest_bulk_urls(req: IngestBulkURLsRequest):
-    job_id = background_jobs.queue_bulk_url_ingest(
+    queued = background_jobs.queue_bulk_url_ingest(
         req.urls,
         tags=req.tags,
         workspace=req.workspace or "default",
         embed_model_id=req.embed_model_id,
         auto_tag=req.auto_tag,
+        include_meta=True,
     )
-    return JobQueuedResponse(job_id=job_id, status="pending")
+    return JobQueuedResponse(**queued)
 
 
 @app.post("/suggest-tags", response_model=TagSuggestResponse)

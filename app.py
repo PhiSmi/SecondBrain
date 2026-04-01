@@ -4,6 +4,7 @@ import datetime
 import html
 import json
 import logging
+from pathlib import Path
 
 import streamlit as st
 
@@ -246,6 +247,46 @@ _css = f"""
     margin: 0 0 1rem 0;
 }}
 
+.queue-hero {{
+    border-radius: 20px;
+    padding: 1.1rem 1.2rem;
+    margin-bottom: 0.9rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.9rem;
+}}
+
+.queue-hero h4 {{
+    margin: 0 0 0.35rem 0;
+    color: #fff;
+    font-size: 1.05rem;
+}}
+
+.queue-hero p {{
+    margin: 0;
+    color: var(--sb-muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+    max-width: 52rem;
+}}
+
+.queue-kicker {{
+    color: var(--sb-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}}
+
+.queue-meta {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: flex-end;
+}}
+
 .section-divider {{
     height: 1px;
     background: linear-gradient(90deg, transparent, {_theme["border_color"]}, transparent);
@@ -472,6 +513,15 @@ def _format_timestamp(value: str | None) -> str:
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
+def _parse_timestamp(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def _job_summary(job: dict) -> str:
     status = job.get("status")
     result = job.get("result") or {}
@@ -498,11 +548,278 @@ def _job_progress(job: dict) -> tuple[float, str] | None:
     if total <= 0:
         return None
     current = int(job.get("progress_current") or 0)
-    if job.get("status") in {"succeeded", "cancelled"}:
+    status = job.get("status")
+    if status == "succeeded":
         current = total
     ratio = min(max(current / total, 0.0), 1.0)
-    message = job.get("progress_message") or _job_summary(job)
+    if status in {"succeeded", "failed", "cancelled", "cancelling"}:
+        message = _job_summary(job)
+    elif status == "pending":
+        message = job.get("progress_message") or "Queued"
+    else:
+        message = job.get("progress_message") or _job_summary(job)
     return ratio, f"{current}/{total} • {message}"
+
+
+def _job_status_label(status: str) -> str:
+    return {
+        "pending": "Queued",
+        "running": "Working",
+        "cancelling": "Stopping",
+        "cancelled": "Stopped",
+        "failed": "Needs retry",
+        "succeeded": "Done",
+    }.get(status, status.title())
+
+
+def _job_status_priority(status: str) -> int:
+    return {
+        "running": 0,
+        "cancelling": 1,
+        "pending": 2,
+        "failed": 3,
+        "succeeded": 4,
+        "cancelled": 5,
+    }.get(status, 6)
+
+
+def _track_ingest_job(job_id: int, workspace: str) -> None:
+    st.session_state["ingest_focus_job_id"] = job_id
+    st.session_state["ingest_focus_workspace"] = workspace
+    st.session_state[f"ingest_focus_status_{job_id}"] = "pending"
+
+
+def _resolve_focus_job(jobs: list[dict], workspace: str) -> dict | None:
+    focus_job_id = st.session_state.get("ingest_focus_job_id")
+    if focus_job_id and st.session_state.get("ingest_focus_workspace") == workspace:
+        tracked = next((job for job in jobs if job["id"] == focus_job_id), None)
+        if tracked is None:
+            tracked = background_jobs.get_job(focus_job_id)
+        if tracked and tracked.get("workspace") == workspace:
+            return tracked
+    return next(
+        (job for job in jobs if job["status"] in {"running", "cancelling", "pending"}),
+        jobs[0] if jobs else None,
+    )
+
+
+def _notify_focus_job(job: dict | None) -> None:
+    if not job:
+        return
+    if st.session_state.get("ingest_focus_job_id") != job["id"]:
+        return
+    state_key = f"ingest_focus_status_{job['id']}"
+    previous_status = st.session_state.get(state_key)
+    current_status = job["status"]
+    if previous_status == current_status:
+        return
+    if current_status == "running":
+        st.toast(f'Now processing "{job["title"]}".')
+    elif current_status == "cancelling":
+        st.toast(f'Stopping "{job["title"]}" after the current step.')
+    elif current_status == "succeeded":
+        result = job.get("result") or {}
+        chunks = result.get("chunks")
+        detail = f" Stored {chunks} chunks." if chunks else ""
+        st.toast(f'Finished "{job["title"]}".{detail}')
+    elif current_status == "failed":
+        st.toast(f'Import failed for "{job["title"]}".')
+    elif current_status == "cancelled":
+        st.toast(f'Cancelled "{job["title"]}".')
+    st.session_state[state_key] = current_status
+
+
+def _queue_job_notice(job_response: dict, workspace: str, label: str) -> None:
+    _track_ingest_job(job_response["job_id"], workspace)
+    if job_response.get("reused"):
+        if job_response.get("status") == "running":
+            st.toast(f'{label} is already being processed as job #{job_response["job_id"]}. Watching that import instead.')
+        elif job_response.get("status") == "cancelling":
+            st.toast(f'{label} is already stopping as job #{job_response["job_id"]}. Watching that import instead.')
+        else:
+            st.toast(f'{label} is already in the queue as job #{job_response["job_id"]}. Watching that import instead.')
+        return
+    st.toast(f'Queued background job #{job_response["job_id"]} for {label}. Watch the live queue below.')
+
+
+def _focused_source_id(workspace: str) -> int | None:
+    if st.session_state.get("source_focus_workspace") == workspace:
+        return st.session_state.get("source_focus_id")
+    return None
+
+
+def _focus_source(source_id: int, workspace: str) -> None:
+    st.session_state["source_focus_id"] = source_id
+    st.session_state["source_focus_workspace"] = workspace
+    st.session_state["src_query"] = ""
+    st.session_state["src_ft"] = []
+
+
+def _clear_source_focus() -> None:
+    for key in ["source_focus_id", "source_focus_workspace"]:
+        st.session_state.pop(key, None)
+
+
+def _job_can_retry(job: dict) -> bool:
+    if job["status"] not in {"failed", "cancelled"}:
+        return False
+    if job["job_type"] != "file":
+        return True
+    path = job.get("payload", {}).get("path")
+    return bool(path and Path(path).exists())
+
+
+def _job_retry_hint(job: dict) -> str | None:
+    if job["status"] not in {"failed", "cancelled"}:
+        return None
+    if job["job_type"] == "file" and not _job_can_retry(job):
+        return "Original upload is no longer available. Upload the file again to retry."
+    return None
+
+
+def _job_current_batch_url(job: dict) -> str | None:
+    if job.get("job_type") != "bulk_urls":
+        return None
+    urls = job.get("payload", {}).get("urls", [])
+    current = int(job.get("progress_current") or 0)
+    if current >= len(urls):
+        return None
+    if job.get("status") not in {"pending", "running", "cancelling"}:
+        return None
+    return urls[current]
+
+
+def _job_pending_age_seconds(job: dict) -> float | None:
+    if job.get("status") != "pending":
+        return None
+    created_at = _parse_timestamp(job.get("created_at"))
+    if created_at is None:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    created_at = created_at.astimezone(datetime.timezone.utc)
+    return max((now - created_at).total_seconds(), 0.0)
+
+
+def _render_job_card(job: dict, *, focus_job_id: int | None, active_workspace: str) -> None:
+    with st.container(border=True):
+        content_col, action_col = st.columns([6, 1.3])
+        with content_col:
+            st.markdown(f"**{job['title']}**")
+            if focus_job_id and job["id"] == focus_job_id:
+                st.markdown(
+                    _render_badges(["Watching live"], class_name="workspace-badge"),
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                _render_badges(
+                    [
+                        f"#{job['id']}",
+                        job["job_type"].replace("_", " "),
+                        _job_status_label(job["status"]),
+                        job["workspace"],
+                    ]
+                ),
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Queued {_format_timestamp(job.get('created_at'))}"
+                + (
+                    f" | Finished {_format_timestamp(job.get('finished_at'))}"
+                    if job.get("finished_at")
+                    else ""
+                )
+            )
+            st.caption(
+                f"Attempts: {job.get('attempt_count', 0)}"
+                + (
+                    f" | Last heartbeat {_format_timestamp(job.get('heartbeat_at'))}"
+                    if job.get("heartbeat_at")
+                    else ""
+                )
+            )
+            progress = _job_progress(job)
+            if progress is not None:
+                progress_text = progress[1].replace("•", "|")
+                st.progress(progress[0], text=progress_text)
+            summary = _job_summary(job)
+            if job["status"] == "failed":
+                st.error(summary)
+            elif job["status"] in {"cancelled", "cancelling"}:
+                st.warning(summary)
+            elif job["status"] == "succeeded":
+                st.success(summary)
+                if job.get("result", {}).get("source_id"):
+                    st.caption(f"Added to the library as source #{job['result']['source_id']}.")
+            else:
+                st.caption(summary)
+
+            if job["job_type"] == "bulk_urls":
+                running_result = job.get("result", {}) or {}
+                current_url = _job_current_batch_url(job)
+                detail_badges = [
+                    f"{running_result.get('succeeded', 0)} succeeded",
+                    f"{running_result.get('failed', 0)} failed" if running_result.get("failed") else None,
+                    f"{max((running_result.get('total_urls') or 0) - len(running_result.get('results', [])), 0)} remaining",
+                ]
+                st.markdown(_render_badges(detail_badges), unsafe_allow_html=True)
+                if current_url:
+                    st.caption(f"Current URL: {current_url}")
+                if running_result.get("results"):
+                    with st.expander("Batch details", expanded=job["status"] in {"running", "cancelling"}):
+                        for item in running_result["results"]:
+                            if item.get("error"):
+                                st.error(f"{item['url']} | {item['error']}")
+                            elif item.get("warning"):
+                                st.warning(f"{item['url']} | {item.get('chunks', 0)} chunks (JS-rendered)")
+                            else:
+                                st.write(f"{item['url']} | {item.get('chunks', 0)} chunks")
+            elif job.get("result", {}).get("source_id"):
+                source = db.get_source(job["result"]["source_id"])
+                if source:
+                    st.markdown(
+                        f'<div class="source-summary">{html.escape(_source_preview(source["id"]))}</div>',
+                        unsafe_allow_html=True,
+                    )
+        with action_col:
+            if job["status"] in {"pending", "running"} and st.button(
+                "Cancel" if job["status"] == "pending" else "Stop",
+                key=f"cancel_job_{job['id']}",
+                use_container_width=True,
+            ):
+                cancel_status = background_jobs.cancel_job(job["id"])
+                if cancel_status == "cancelled":
+                    st.success(f"Cancelled job #{job['id']}.")
+                    st.rerun()
+                if cancel_status == "cancelling":
+                    st.warning(f"Cancellation requested for job #{job['id']}.")
+                    st.rerun()
+                st.warning(f"Job #{job['id']} could not be cancelled.")
+
+            if job["status"] in {"failed", "cancelled"}:
+                retry_disabled = not _job_can_retry(job)
+                if st.button(
+                    "Retry",
+                    key=f"retry_job_{job['id']}",
+                    disabled=retry_disabled,
+                    use_container_width=True,
+                ):
+                    retry_response = background_jobs.retry_job(job["id"])
+                    if retry_response:
+                        _queue_job_notice(retry_response, active_workspace, f'"{job["title"]}"')
+                        st.rerun()
+                    st.warning(f"Job #{job['id']} could not be retried.")
+                retry_hint = _job_retry_hint(job)
+                if retry_hint:
+                    st.caption(retry_hint)
+
+            if job.get("result", {}).get("source_id") and st.button(
+                "Focus source",
+                key=f"focus_source_{job['id']}",
+                use_container_width=True,
+            ):
+                _focus_source(job["result"]["source_id"], job["workspace"])
+                st.toast(f'Source #{job["result"]["source_id"]} is ready in the Sources tab.')
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # Sidebar — workspace + settings
@@ -677,28 +994,45 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-hero_col1, hero_col2, hero_col3, hero_col4 = st.columns(4)
-with hero_col1:
-    _render_metric_card(active_workspace, "Current workspace", kicker="Command")
-with hero_col2:
-    _render_metric_card(workspace_stats["source_count"], "Stored sources", kicker="Library")
-with hero_col3:
-    _render_metric_card(background_jobs.embedded_worker_status().title(), "Queue worker", kicker="Ingest")
-with hero_col4:
-    _render_metric_card(
-        f"{system_status['summary']['passed']}/{system_status['summary']['total']}",
-        _status_label(system_status["status"]),
-        kicker="Validation",
+@st.fragment(run_every="3s")
+def _render_live_workspace_header() -> None:
+    live_workspace_stats = db.get_stats(workspace=active_workspace)
+    live_system_status = runtime_checks.collect_system_status()
+    live_jobs = background_jobs.list_jobs(limit=30, workspace=active_workspace)
+    live_pending = sum(1 for job in live_jobs if job["status"] == "pending")
+    live_active = sum(1 for job in live_jobs if job["status"] in {"running", "cancelling"})
+    worker_state = background_jobs.embedded_worker_status()
+    if live_active:
+        queue_value = f"{live_active} active"
+        queue_label = f"{live_pending} waiting | worker {worker_state}"
+    elif live_pending:
+        queue_value = f"{live_pending} queued"
+        queue_label = f"Worker {worker_state} | queue waiting"
+    else:
+        queue_value = worker_state.title()
+        queue_label = "Queue clear"
+
+    hero_col1, hero_col2, hero_col3, hero_col4 = st.columns(4)
+    with hero_col1:
+        _render_metric_card(active_workspace, "Current workspace", kicker="Command")
+    with hero_col2:
+        _render_metric_card(live_workspace_stats["source_count"], "Stored sources", kicker="Library")
+    with hero_col3:
+        _render_metric_card(live_workspace_stats["chunk_count"], "Stored chunks", kicker="Library")
+    with hero_col4:
+        _render_metric_card(queue_value, queue_label, kicker="Live queue")
+
+    st.markdown(
+        f"""
+        <div class="status-banner {_status_class(live_system_status['status'])}">
+            <p>{html.escape(live_system_status['persistence']['detail'])} Back up or mount <code>{html.escape(live_system_status['paths']['data_dir'])}</code> to keep your knowledge base across restarts.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-st.markdown(
-    f"""
-    <div class="status-banner {_status_class(system_status['status'])}">
-        <p>{html.escape(system_status['persistence']['detail'])} Back up or mount <code>{html.escape(system_status['paths']['data_dir'])}</code> to keep your knowledge base across restarts.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+
+_render_live_workspace_header()
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -800,15 +1134,16 @@ with tab_ingest:
             elif not title.strip():
                 st.error("Please provide a title.")
             elif queue_ingest:
-                job_id = background_jobs.queue_text_ingest(
+                job_response = background_jobs.queue_text_ingest(
                     text,
                     title=title.strip(),
                     tags=tags,
                     workspace=active_workspace,
                     embed_model_id=embed_model_id,
                     auto_tag=use_autotag and not tags,
+                    include_meta=True,
                 )
-                st.success(f'Queued background job #{job_id} for "{title.strip()}".')
+                _queue_job_notice(job_response, active_workspace, f'"{title.strip()}"')
             else:
                 if use_autotag and not tags:
                     with st.spinner("Auto-tagging..."):
@@ -827,15 +1162,16 @@ with tab_ingest:
             if not url.strip():
                 st.error("Please enter a URL.")
             elif queue_ingest:
-                job_id = background_jobs.queue_url_ingest(
+                job_response = background_jobs.queue_url_ingest(
                     url.strip(),
                     title=title.strip() or None,
                     tags=tags,
                     workspace=active_workspace,
                     embed_model_id=embed_model_id,
                     auto_tag=use_autotag and not tags,
+                    include_meta=True,
                 )
-                st.success(f"Queued background job #{job_id} for {url.strip()}.")
+                _queue_job_notice(job_response, active_workspace, url.strip())
             else:
                 with st.spinner("Fetching and processing..."):
                     try:
@@ -886,7 +1222,7 @@ with tab_ingest:
             else:
                 file_bytes = uploaded.read()
                 if queue_ingest:
-                    job_id = background_jobs.queue_file_ingest(
+                    job_response = background_jobs.queue_file_ingest(
                         file_bytes,
                         uploaded.name,
                         title=title.strip(),
@@ -895,8 +1231,9 @@ with tab_ingest:
                         embed_model_id=embed_model_id,
                         ocr=use_ocr,
                         auto_tag=use_autotag and not tags,
+                        include_meta=True,
                     )
-                    st.success(f'Queued background job #{job_id} for "{title.strip()}".')
+                    _queue_job_notice(job_response, active_workspace, f'"{title.strip()}"')
                 else:
                     logger.info(
                         "Starting file ingest for '%s' (%s bytes) in workspace=%s",
@@ -923,15 +1260,16 @@ with tab_ingest:
             if not url.strip():
                 st.error("Please enter a YouTube URL.")
             elif queue_ingest:
-                job_id = background_jobs.queue_youtube_ingest(
+                job_response = background_jobs.queue_youtube_ingest(
                     url.strip(),
                     title=title.strip() or None,
                     tags=tags,
                     workspace=active_workspace,
                     embed_model_id=embed_model_id,
                     auto_tag=use_autotag and not tags,
+                    include_meta=True,
                 )
-                st.success(f"Queued background job #{job_id} for the transcript import.")
+                _queue_job_notice(job_response, active_workspace, "the transcript import")
             else:
                 with st.spinner("Fetching transcript..."):
                     try:
@@ -988,14 +1326,15 @@ with tab_ingest:
             if not urls:
                 st.error("Please enter at least one URL.")
             elif queue_ingest:
-                job_id = background_jobs.queue_bulk_url_ingest(
+                job_response = background_jobs.queue_bulk_url_ingest(
                     urls,
                     tags=tags,
                     workspace=active_workspace,
                     embed_model_id=embed_model_id,
                     auto_tag=use_autotag and not tags,
+                    include_meta=True,
                 )
-                st.success(f"Queued background job #{job_id} for {len(urls)} URLs.")
+                _queue_job_notice(job_response, active_workspace, f"{len(urls)} URLs")
             else:
                 progress = st.progress(0)
                 results = []
@@ -1050,10 +1389,20 @@ with tab_ingest:
 
     @st.fragment(run_every="3s" if auto_refresh_jobs else None)
     def _render_jobs_fragment() -> None:
-        if auto_refresh_jobs:
-            st.caption("Queue updates every 3 seconds while auto-refresh is enabled.")
+        refresh_mode = (
+            "Queue updates every 3 seconds while auto-refresh is enabled."
+            if auto_refresh_jobs
+            else "Auto-refresh is off. Use Refresh for a manual snapshot."
+        )
+        st.caption(f"{refresh_mode} Last checked {datetime.datetime.now().astimezone().strftime('%H:%M:%S')}.")
 
-        jobs = background_jobs.list_jobs(limit=12, workspace=active_workspace)
+        jobs = background_jobs.list_jobs(limit=30, workspace=active_workspace)
+        jobs = sorted(jobs, key=lambda job: job.get("created_at") or "", reverse=True)
+        jobs = sorted(jobs, key=lambda job: _job_status_priority(job["status"]))
+        focus_job = _resolve_focus_job(jobs, active_workspace)
+        _notify_focus_job(focus_job)
+        live_workspace_stats = db.get_stats(workspace=active_workspace)
+        worker_state = background_jobs.embedded_worker_status()
         if not jobs:
             st.info(_ingest_cfg.get("jobs_empty_message", "No ingestion jobs yet."))
             return
@@ -1062,6 +1411,67 @@ with tab_ingest:
         active_jobs = sum(1 for job in jobs if job["status"] in {"running", "cancelling"})
         failed_jobs = sum(1 for job in jobs if job["status"] == "failed")
         completed_jobs = sum(1 for job in jobs if job["status"] in {"succeeded", "cancelled"})
+        failed_focus = next((job for job in jobs if job["status"] == "failed"), None)
+        active_job_cards = [job for job in jobs if job["status"] in {"pending", "running", "cancelling"}]
+        history_jobs = [job for job in jobs if job["status"] not in {"pending", "running", "cancelling"}]
+        oldest_pending = next((job for job in active_job_cards if job["status"] == "pending"), None)
+        pending_age = _job_pending_age_seconds(oldest_pending) if oldest_pending else None
+        queue_badges = [
+            f"{live_workspace_stats['source_count']} sources",
+            f"{live_workspace_stats['chunk_count']} chunks",
+            f"{completed_jobs} closed" if completed_jobs else None,
+            f"{failed_jobs} need attention" if failed_jobs else None,
+        ]
+        if pending_jobs and active_jobs == 0 and worker_state != "online":
+            hero_title = "Queue is waiting for a worker"
+            hero_body = f"The worker is {worker_state}. Pending imports will not move until the worker comes online."
+            hero_class = "status-fail"
+        elif pending_jobs and active_jobs == 0 and pending_age and pending_age > 15:
+            hero_title = "Queue looks stalled"
+            hero_body = "Imports are still pending but nothing is actively processing. Refreshing or restarting the worker should pick them up."
+            hero_class = "status-warning"
+        elif active_jobs:
+            hero_title = f"{active_jobs} import{'s' if active_jobs != 1 else ''} active"
+            hero_body = "The worker is processing the queue now. Job cards below will flip from queued to working to done automatically."
+            hero_class = "status-pass"
+        elif pending_jobs:
+            hero_title = f"{pending_jobs} import{'s' if pending_jobs != 1 else ''} waiting in queue"
+            hero_body = "The worker has not picked up the next job yet. Keep auto-refresh on and this panel will advance as soon as processing starts."
+            hero_class = "status-warning"
+        elif failed_focus:
+            hero_title = "Queue needs attention"
+            hero_body = _job_summary(failed_focus)
+            hero_class = "status-fail"
+        elif focus_job and focus_job["status"] == "succeeded":
+            hero_title = f'"{focus_job["title"]}" finished'
+            hero_body = (
+                f"{_job_summary(focus_job)} Library now holds {live_workspace_stats['source_count']} "
+                f"sources and {live_workspace_stats['chunk_count']} chunks in this workspace."
+            )
+            hero_class = "status-pass"
+        else:
+            hero_title = "Queue clear"
+            hero_body = (
+                f"No imports are running right now. Library currently holds "
+                f"{live_workspace_stats['source_count']} sources and {live_workspace_stats['chunk_count']} "
+                "chunks in this workspace."
+            )
+            hero_class = "status-pass"
+        if focus_job and focus_job["status"] in {"pending", "running", "cancelling"}:
+            queue_badges.insert(0, f'Watching #{focus_job["id"]}')
+        st.markdown(
+            f"""
+            <div class="queue-hero metric-card {hero_class}">
+                <div>
+                    <div class="queue-kicker">Live Ingest Status</div>
+                    <h4>{html.escape(hero_title)}</h4>
+                    <p>{html.escape(hero_body)}</p>
+                </div>
+                <div class="queue-meta">{_render_badges(queue_badges)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         job_col1, job_col2, job_col3, job_col4 = st.columns(4)
         with job_col1:
             _render_metric_card(pending_jobs, "Pending", kicker="Jobs")
@@ -1072,75 +1482,64 @@ with tab_ingest:
         with job_col4:
             _render_metric_card(failed_jobs, "Failed", kicker="Jobs")
 
-        for job in jobs:
-            with st.container(border=True):
-                content_col, action_col = st.columns([6, 1])
-                with content_col:
-                    st.markdown(f"**{job['title']}**")
-                    st.markdown(
-                        _render_badges(
-                            [
-                                f"#{job['id']}",
-                                job["job_type"].replace("_", " "),
-                                job["status"],
-                                job["workspace"],
-                            ]
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                    st.caption(
-                        f"Queued {_format_timestamp(job.get('created_at'))}"
-                        + (
-                            f" | Finished {_format_timestamp(job.get('finished_at'))}"
-                            if job.get("finished_at")
-                            else ""
-                        )
-                    )
-                    st.caption(
-                        f"Attempts: {job.get('attempt_count', 0)}"
-                        + (
-                            f" | Last heartbeat {_format_timestamp(job.get('heartbeat_at'))}"
-                            if job.get("heartbeat_at")
-                            else ""
-                        )
-                    )
-                    progress = _job_progress(job)
-                    if progress is not None:
-                        progress_text = progress[1].replace("•", "|")
-                        st.progress(progress[0], text=progress_text)
-                    summary = _job_summary(job)
-                    if job["status"] == "failed":
-                        st.error(summary)
-                    elif job["status"] in {"cancelled", "cancelling"}:
-                        st.warning(summary)
-                    elif job["status"] == "succeeded":
-                        st.success(summary)
-                    else:
-                        st.caption(summary)
+        st.markdown("#### Active Imports")
+        if active_job_cards:
+            for job in active_job_cards:
+                _render_job_card(job, focus_job_id=focus_job["id"] if focus_job else None, active_workspace=active_workspace)
+        else:
+            st.info("No imports are currently running or waiting.")
 
-                    if job["job_type"] == "bulk_urls" and job.get("result", {}).get("results"):
-                        with st.expander("Batch details", expanded=False):
-                            for item in job["result"]["results"]:
-                                if item.get("error"):
-                                    st.error(f"{item['url']} | {item['error']}")
-                                elif item.get("warning"):
-                                    st.warning(f"{item['url']} | {item.get('chunks', 0)} chunks (JS-rendered)")
-                                else:
-                                    st.write(f"{item['url']} | {item.get('chunks', 0)} chunks")
-                with action_col:
-                    if job["status"] in {"pending", "running"} and st.button(
-                        "Cancel" if job["status"] == "pending" else "Stop",
-                        key=f"cancel_job_{job['id']}",
-                        use_container_width=True,
-                    ):
-                        cancel_status = background_jobs.cancel_job(job["id"])
-                        if cancel_status == "cancelled":
-                            st.success(f"Cancelled job #{job['id']}.")
-                            st.rerun()
-                        if cancel_status == "cancelling":
-                            st.warning(f"Cancellation requested for job #{job['id']}.")
-                            st.rerun()
-                        st.warning(f"Job #{job['id']} could not be cancelled.")
+        history_header_col, history_clear_done_col, history_clear_failed_col, history_clear_all_col = st.columns(
+            [3, 1, 1, 1]
+        )
+        with history_header_col:
+            st.markdown(f"#### Recent History ({len(history_jobs)})")
+        with history_clear_done_col:
+            if st.button(
+                "Clear done",
+                key=f"clear_done_jobs_{active_workspace}",
+                disabled=completed_jobs == 0,
+                use_container_width=True,
+            ):
+                cleared = background_jobs.clear_jobs(
+                    workspace=active_workspace,
+                    statuses={"succeeded", "cancelled"},
+                )
+                st.toast(f"Cleared {cleared} completed job record(s).")
+                st.rerun()
+        with history_clear_failed_col:
+            if st.button(
+                "Clear failed",
+                key=f"clear_failed_jobs_{active_workspace}",
+                disabled=failed_jobs == 0,
+                use_container_width=True,
+            ):
+                cleared = background_jobs.clear_jobs(
+                    workspace=active_workspace,
+                    statuses={"failed"},
+                )
+                st.toast(f"Cleared {cleared} failed job record(s).")
+                st.rerun()
+        with history_clear_all_col:
+            if st.button(
+                "Clear history",
+                key=f"clear_history_jobs_{active_workspace}",
+                disabled=not history_jobs,
+                use_container_width=True,
+            ):
+                cleared = background_jobs.clear_jobs(
+                    workspace=active_workspace,
+                    statuses={"succeeded", "cancelled", "failed"},
+                )
+                st.toast(f"Cleared {cleared} history item(s).")
+                st.rerun()
+
+        if history_jobs:
+            with st.expander("Open recent history", expanded=failed_jobs > 0):
+                for job in history_jobs:
+                    _render_job_card(job, focus_job_id=focus_job["id"] if focus_job else None, active_workspace=active_workspace)
+        else:
+            st.caption("Finished, cancelled, and failed imports will appear here.")
 
     _render_jobs_fragment()
 
@@ -1366,6 +1765,7 @@ with tab_history:
 
 with tab_sources:
     st.subheader(config.ui("sources").get("heading", "Ingested Sources"))
+    focused_source_id = _focused_source_id(active_workspace)
 
     col_search, col_filter, col_export = st.columns([2, 2, 1])
     with col_search:
@@ -1399,13 +1799,33 @@ with tab_sources:
         ]
     if filter_tags:
         sources = [s for s in sources if any(t in s["tags"] for t in filter_tags)]
+    if focused_source_id:
+        sources = sorted(sources, key=lambda source: 0 if source["id"] == focused_source_id else 1)
+        focused_source = db.get_source(focused_source_id)
+        if focused_source and focused_source.get("workspace") == active_workspace:
+            focus_col, clear_focus_col = st.columns([4, 1])
+            with focus_col:
+                st.markdown(
+                    f"""
+                    <div class="status-banner status-pass">
+                        <p><strong>Focused Source:</strong> {html.escape(focused_source["title"])} is ready below. Its entry will open expanded in this tab.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with clear_focus_col:
+                if st.button("Clear focus", key=f"clear_source_focus_{active_workspace}", use_container_width=True):
+                    _clear_source_focus()
+                    st.rerun()
 
     if not sources:
         st.info(config.ui("sources").get("empty_message", "No sources ingested yet."))
     else:
         for src in sources:
             label = f"**{src['title']}**  ·  {src['chunk_count']} chunks  ·  {src['source_type']}  ·  {src['ingested_at'][:10]}"
-            with st.expander(label):
+            if focused_source_id == src["id"]:
+                label = f"**Focused**  ·  {label}"
+            with st.expander(label, expanded=focused_source_id == src["id"]):
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     st.markdown(

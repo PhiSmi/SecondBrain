@@ -3,6 +3,7 @@
 import json
 import re
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -610,7 +611,7 @@ def create_ingest_job(
             job_type,
             title,
             workspace,
-            json.dumps(payload),
+            json.dumps(payload, sort_keys=True),
             progress_total,
             progress_message,
             _utcnow(),
@@ -641,6 +642,25 @@ def get_ingest_jobs(limit: int = 25, workspace: str | None = None) -> list[dict]
             "SELECT * FROM ingest_jobs ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+    conn.close()
+    return [_job_from_row(row) for row in rows]
+
+
+def get_open_ingest_jobs(limit: int = 25, workspace: str | None = None, job_type: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    params: list[object] = []
+    conditions = ["status IN ('pending', 'running', 'cancelling')"]
+    if workspace:
+        conditions.append("workspace = ?")
+        params.append(workspace)
+    if job_type:
+        conditions.append("job_type = ?")
+        params.append(job_type)
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM ingest_jobs WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT ?",
+        params,
+    ).fetchall()
     conn.close()
     return [_job_from_row(row) for row in rows]
 
@@ -749,6 +769,35 @@ def update_ingest_job_progress(
     return updated
 
 
+def update_ingest_job_result(
+    job_id: int,
+    worker_id: str,
+    result: dict,
+    *,
+    lease_seconds: int = 0,
+) -> bool:
+    conn = _get_conn()
+    now = _utcnow()
+    params: list[object] = [json.dumps(result, sort_keys=True), now]
+    assignments = ["result = ?", "heartbeat_at = ?"]
+    if lease_seconds > 0:
+        lease_expires_at = datetime.fromtimestamp(
+            datetime.fromisoformat(now).timestamp() + lease_seconds,
+            tz=timezone.utc,
+        ).isoformat()
+        assignments.append("lease_expires_at = ?")
+        params.append(lease_expires_at)
+    params.extend([job_id, worker_id])
+    cur = conn.execute(
+        f"UPDATE ingest_jobs SET {', '.join(assignments)} WHERE id = ? AND worker_id = ? AND status = 'running'",
+        params,
+    )
+    conn.commit()
+    updated = cur.rowcount == 1
+    conn.close()
+    return updated
+
+
 def touch_ingest_job_lease(job_id: int, worker_id: str, lease_seconds: int) -> bool:
     conn = _get_conn()
     now = _utcnow()
@@ -773,16 +822,17 @@ def complete_ingest_job(job_id: int, result: dict) -> None:
     conn.execute(
         """UPDATE ingest_jobs
            SET status = 'succeeded',
-               result = ?,
-               error = NULL,
-               finished_at = ?,
-               heartbeat_at = NULL,
-               lease_expires_at = NULL,
-               progress_current = CASE
-                   WHEN progress_total > 0 THEN progress_total
-                   ELSE progress_current
-               END
-           WHERE id = ?""",
+                result = ?,
+                error = NULL,
+                finished_at = ?,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                progress_message = 'Completed',
+                progress_current = CASE
+                    WHEN progress_total > 0 THEN progress_total
+                    ELSE progress_current
+                END
+            WHERE id = ?""",
         (json.dumps(result), _utcnow(), job_id),
     )
     conn.commit()
@@ -794,11 +844,12 @@ def fail_ingest_job(job_id: int, error: str) -> None:
     conn.execute(
         """UPDATE ingest_jobs
            SET status = 'failed',
-               error = ?,
-               finished_at = ?,
-               heartbeat_at = NULL,
-               lease_expires_at = NULL
-           WHERE id = ?""",
+                error = ?,
+                finished_at = ?,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                progress_message = 'Failed'
+            WHERE id = ?""",
         (error, _utcnow(), job_id),
     )
     conn.commit()
@@ -809,7 +860,9 @@ def cancel_ingest_job(job_id: int) -> str | None:
     conn = _get_conn()
     cur = conn.execute(
         """UPDATE ingest_jobs
-           SET status = 'cancelled', finished_at = ?
+           SET status = 'cancelled',
+               finished_at = ?,
+               progress_message = 'Cancelled'
            WHERE id = ? AND status = 'pending'""",
         (_utcnow(), job_id),
     )
@@ -820,7 +873,8 @@ def cancel_ingest_job(job_id: int) -> str | None:
 
     cur = conn.execute(
         """UPDATE ingest_jobs
-           SET status = 'cancelling'
+           SET status = 'cancelling',
+               progress_message = 'Stopping after the current step'
            WHERE id = ? AND status = 'running'""",
         (job_id,),
     )
@@ -849,8 +903,9 @@ def mark_ingest_job_cancelled(job_id: int, worker_id: str | None = None) -> None
                SET status = 'cancelled',
                    finished_at = ?,
                    heartbeat_at = NULL,
-                   lease_expires_at = NULL
-               WHERE id = ? AND worker_id = ?""",
+                   lease_expires_at = NULL,
+                   progress_message = 'Cancelled'
+                WHERE id = ? AND worker_id = ?""",
             (_utcnow(), job_id, worker_id),
         )
     else:
@@ -859,12 +914,34 @@ def mark_ingest_job_cancelled(job_id: int, worker_id: str | None = None) -> None
                SET status = 'cancelled',
                    finished_at = ?,
                    heartbeat_at = NULL,
-                   lease_expires_at = NULL
-               WHERE id = ?""",
+                   lease_expires_at = NULL,
+                   progress_message = 'Cancelled'
+                WHERE id = ?""",
             (_utcnow(), job_id),
         )
     conn.commit()
     conn.close()
+
+
+def delete_ingest_jobs(statuses: Iterable[str], workspace: str | None = None) -> list[dict]:
+    statuses = [status for status in statuses if status]
+    if not statuses:
+        return []
+    conn = _get_conn()
+    placeholders = ", ".join("?" for _ in statuses)
+    params: list[object] = list(statuses)
+    where = f"status IN ({placeholders})"
+    if workspace:
+        where += " AND workspace = ?"
+        params.append(workspace)
+    rows = conn.execute(f"SELECT * FROM ingest_jobs WHERE {where}", params).fetchall()
+    if rows:
+        conn.execute(f"DELETE FROM ingest_jobs WHERE {where}", params)
+        conn.commit()
+    else:
+        conn.rollback()
+    conn.close()
+    return [_job_from_row(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------

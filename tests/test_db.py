@@ -266,12 +266,20 @@ class TestIngestJobs:
             lease_seconds=300,
         )
         assert updated is True
+        result_updated = db.update_ingest_job_result(
+            job_id,
+            "worker-a",
+            {"stage": "embedding"},
+            lease_seconds=300,
+        )
+        assert result_updated is True
 
         db.complete_ingest_job(job_id, {"chunks": 3})
         stored = db.get_ingest_job(job_id)
         assert stored["status"] == "succeeded"
         assert stored["result"]["chunks"] == 3
         assert stored["progress_current"] == 4
+        assert stored["progress_message"] == "Completed"
 
     def test_cancel_pending_job(self):
         job_id = db.create_ingest_job(
@@ -283,6 +291,7 @@ class TestIngestJobs:
         assert db.cancel_ingest_job(job_id) == "cancelled"
         job = db.get_ingest_job(job_id)
         assert job["status"] == "cancelled"
+        assert job["progress_message"] == "Cancelled"
 
     def test_reclaim_stale_running_job(self):
         job_id = db.create_ingest_job(
@@ -321,6 +330,86 @@ class TestIngestJobs:
         assert claimed is not None
         assert db.cancel_ingest_job(job_id) == "cancelling"
         assert db.is_ingest_job_cancelling(job_id, "worker-a") is True
+        job = db.get_ingest_job(job_id)
+        assert job["progress_message"] == "Stopping after the current step"
         db.mark_ingest_job_cancelled(job_id, "worker-a")
         job = db.get_ingest_job(job_id)
         assert job["status"] == "cancelled"
+        assert job["progress_message"] == "Cancelled"
+
+    def test_fail_job_sets_terminal_progress_message(self):
+        job_id = db.create_ingest_job(
+            "text",
+            title="Break me",
+            payload={"text": "hello"},
+            workspace="default",
+            progress_total=4,
+            progress_message="Queued",
+        )
+        claimed = db.claim_next_ingest_job("worker-a", lease_seconds=300)
+        assert claimed is not None
+        db.fail_ingest_job(job_id, "boom")
+        job = db.get_ingest_job(job_id)
+        assert job["status"] == "failed"
+        assert job["progress_message"] == "Failed"
+
+    def test_get_open_jobs_filters_terminal_states(self):
+        pending_id = db.create_ingest_job(
+            "text",
+            title="Pending",
+            payload={"text": "hello"},
+            workspace="default",
+        )
+        running_id = db.create_ingest_job(
+            "text",
+            title="Running",
+            payload={"text": "world"},
+            workspace="default",
+        )
+        failed_id = db.create_ingest_job(
+            "text",
+            title="Failed",
+            payload={"text": "!"},
+            workspace="default",
+        )
+        claimed = db.claim_next_ingest_job("worker-a", lease_seconds=300)
+        assert claimed is not None
+        claimed = db.claim_next_ingest_job("worker-b", lease_seconds=300)
+        assert claimed is not None
+        db.fail_ingest_job(failed_id, "boom")
+
+        open_jobs = db.get_open_ingest_jobs(workspace="default")
+        open_ids = {job["id"] for job in open_jobs}
+        assert pending_id in open_ids or running_id in open_ids
+        assert failed_id not in open_ids
+        assert all(job["status"] in {"pending", "running", "cancelling"} for job in open_jobs)
+
+    def test_delete_ingest_jobs_returns_deleted_rows(self):
+        failed_id = db.create_ingest_job(
+            "text",
+            title="Failed",
+            payload={"text": "fail"},
+            workspace="work",
+        )
+        success_id = db.create_ingest_job(
+            "text",
+            title="Done",
+            payload={"text": "done"},
+            workspace="work",
+        )
+        other_workspace_id = db.create_ingest_job(
+            "text",
+            title="Other",
+            payload={"text": "other"},
+            workspace="personal",
+        )
+        db.fail_ingest_job(failed_id, "boom")
+        db.complete_ingest_job(success_id, {"chunks": 1})
+        db.complete_ingest_job(other_workspace_id, {"chunks": 1})
+
+        deleted = db.delete_ingest_jobs({"failed", "succeeded"}, workspace="work")
+        deleted_ids = {job["id"] for job in deleted}
+        assert deleted_ids == {failed_id, success_id}
+        assert db.get_ingest_job(failed_id) is None
+        assert db.get_ingest_job(success_id) is None
+        assert db.get_ingest_job(other_workspace_id) is not None
