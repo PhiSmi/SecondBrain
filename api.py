@@ -33,6 +33,9 @@ class AskRequest(BaseModel):
     tags: list[str] | None = None
     hybrid: bool = True
     use_rerank: bool = False
+    use_hyde: bool = False
+    use_decompose: bool = False
+    use_compress: bool = False
     model_id: str | None = None
     min_similarity: float = 0.0
     workspace: str | None = None
@@ -117,6 +120,9 @@ def api_ask(req: AskRequest):
         tags=req.tags,
         hybrid=req.hybrid,
         use_rerank=req.use_rerank,
+        use_hyde=req.use_hyde,
+        use_decompose=req.use_decompose,
+        use_compress=req.use_compress,
         model_id=req.model_id,
         min_similarity=req.min_similarity,
         workspace=req.workspace,
@@ -266,6 +272,30 @@ def api_cancel_job(job_id: int):
     if status is None:
         raise HTTPException(status_code=409, detail="Job could not be cancelled")
     return {"cancelled": True, "status": status}
+
+
+@app.post("/discover/digest")
+def api_workspace_digest(workspace: str = "default"):
+    """Generate an AI-powered digest of the workspace."""
+    return {"digest": query.workspace_digest(workspace=workspace)}
+
+
+@app.get("/discover/related/{source_id}")
+def api_related_sources(source_id: int, workspace: str | None = None, top_n: int = 5):
+    """Find sources related to a given source."""
+    return query.find_related_sources(source_id, top_n=top_n, workspace=workspace)
+
+
+@app.post("/discover/search")
+def api_semantic_source_search(q: str, workspace: str | None = None):
+    """Search sources by semantic similarity."""
+    return query.semantic_source_search(q, workspace=workspace)
+
+
+@app.post("/ask/followups")
+def api_suggest_followups(question: str, answer: str, workspace: str = "default"):
+    """Suggest follow-up questions based on a Q&A exchange."""
+    return {"followups": query.suggest_followups(question, answer, workspace=workspace)}
 
 
 @app.get("/health")

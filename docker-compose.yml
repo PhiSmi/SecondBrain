@@ -28,3 +28,9 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import db; db._get_conn().execute('SELECT 1'); print('ok')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

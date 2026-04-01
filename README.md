@@ -2,7 +2,7 @@
 
 SecondBrain is a local-first knowledge base for material worth keeping.
 
-It ingests notes, URLs, PDFs, DOCX files, YouTube transcripts, and RSS content, stores them locally, and lets them be queried through a retrieval-augmented workflow. Retrieval and embeddings run on the host machine. Claude is used for answer generation, summaries, auto-tagging, and evaluation.
+It ingests notes, URLs, PDFs, DOCX files, YouTube transcripts, images, and RSS content, stores them locally, and lets them be queried through a retrieval-augmented workflow. Retrieval and embeddings run on the host machine. Claude is used for answer generation, summaries, auto-tagging, image analysis, and evaluation.
 
 The project is designed for personal research libraries, work documentation, study material, and any collection of source content that is easier to ask than to browse.
 
@@ -21,6 +21,7 @@ The result is a searchable memory layer for content already collected:
 - Research papers and study guides
 - Reading lists and newsletter archives
 - PDF-heavy reference material
+- Screenshots, diagrams, and whiteboard photos
 - Topic-specific workspaces for different domains
 
 ## What It Does
@@ -31,6 +32,7 @@ The result is a searchable memory layer for content already collected:
 - Ingest a URL
 - Upload `pdf`, `docx`, `txt`, `md`, `csv`, `json`, or `rst`
 - Fetch YouTube transcripts
+- Upload images (Claude Vision extracts text, describes diagrams and charts)
 - Ingest URLs in bulk
 - Queue long-running imports in the background
 - Subscribe to RSS feeds and pull new entries on demand
@@ -42,10 +44,21 @@ The result is a searchable memory layer for content already collected:
 - BM25 keyword search
 - Hybrid retrieval with Reciprocal Rank Fusion
 - Optional cross-encoder reranking
+- HyDE (Hypothetical Document Embeddings) for better conceptual retrieval
+- Query decomposition for complex multi-part questions
+- Contextual compression to reduce noise in retrieved chunks
 - Streaming answers
 - Tag filters
 - Multi-turn chat history
+- AI-generated follow-up question suggestions
 - Markdown export for the latest answer
+
+### Knowledge Discovery
+
+- Workspace digest — AI-generated summary of key themes, connections, and knowledge gaps
+- Semantic source search — find sources by meaning, not just keywords
+- Related sources — discover connections between sources via embedding similarity
+- Knowledge coverage view — visual tag distribution
 
 ### Knowledge Base Management
 
@@ -70,11 +83,20 @@ The result is a searchable memory layer for content already collected:
 - Duplicate chunk scanning
 - Manual evaluation runs against expected answers
 
+### Analytics
+
+- Source, chunk, and query count metrics
+- Source type breakdown (bar chart)
+- Tag frequency distribution (bar chart)
+- Embedding model usage (bar chart)
+- Ingestion timeline — sources and chunks created per day (area charts)
+- API cost breakdown by model and operation
+
 ### API
 
 The FastAPI app exposes a programmatic surface for the core workflow:
 
-- `POST /ask`
+- `POST /ask` — query with optional HyDE, decomposition, and compression
 - `POST /ingest/text`
 - `POST /ingest/url`
 - `POST /jobs/ingest/text`
@@ -85,6 +107,10 @@ The FastAPI app exposes a programmatic surface for the core workflow:
 - `GET /jobs/{job_id}`
 - `POST /jobs/{job_id}/cancel`
 - `POST /suggest-tags`
+- `POST /discover/digest` — generate workspace digest
+- `GET /discover/related/{source_id}` — find related sources
+- `POST /discover/search` — semantic source search
+- `POST /ask/followups` — suggest follow-up questions
 - `GET /workspaces`
 - `POST /workspaces`
 - `GET /sources`
@@ -93,13 +119,11 @@ The FastAPI app exposes a programmatic surface for the core workflow:
 - `GET /usage`
 - `GET /health`
 
-The API covers the primary ingestion, query, and job-monitoring paths, but the Streamlit UI still contains the broader product surface.
-
 ## How It Works
 
 ### Ingestion Pipeline
 
-1. Content is extracted from the source.
+1. Content is extracted from the source (text, HTML, PDF, DOCX, YouTube, image via Claude Vision).
 2. Text is split into chunks using a markdown-aware chunker.
 3. Each chunk is embedded locally.
 4. Vectors are stored in ChromaDB.
@@ -112,7 +136,16 @@ The API covers the primary ingestion, query, and job-monitoring paths, but the S
 3. BM25 scores are computed over the same result set.
 4. Results are fused with Reciprocal Rank Fusion.
 5. Optional reranking improves the final context set.
-6. Claude answers strictly from the retrieved context.
+6. Optional contextual compression extracts only the relevant parts of each chunk.
+7. Claude answers strictly from the retrieved context.
+
+### Advanced Retrieval Modes
+
+**HyDE (Hypothetical Document Embeddings):** Instead of embedding the question directly, Claude generates a hypothetical passage that would answer the question, then that passage is embedded and used for retrieval. This often finds better results for abstract or conceptual queries because the hypothetical document is closer in embedding space to actual relevant documents.
+
+**Query Decomposition:** Complex multi-part questions are broken into 2-4 simpler sub-questions. Each sub-question retrieves independently, and the results are merged via Reciprocal Rank Fusion. This improves recall for questions like "Compare X and Y, and explain how Z relates to both."
+
+**Contextual Compression:** After retrieval, each chunk is passed through Claude (Haiku, for speed and cost) to extract only the sentences relevant to the question. The compressed chunks are then sent to the main model. This reduces noise significantly when chunks contain mixed-relevance content.
 
 ### Model Handling
 
@@ -129,7 +162,7 @@ That matters for long-lived libraries. It means sources can be re-embedded over 
 - **ChromaDB** for local vector storage
 - **SQLite** for metadata, history, feeds, evaluation pairs, and usage
 - **sentence-transformers** for local embeddings and reranking
-- **Claude** for generation, summaries, auto-tagging, and evaluation scoring
+- **Claude** for generation, summaries, auto-tagging, image analysis, evaluation scoring, HyDE, decomposition, compression, follow-ups, and workspace digests
 
 ### Storage Model
 
@@ -165,6 +198,7 @@ Each workspace has:
 - Its own search history
 - Its own API usage breakdown
 - Its own duplicate detection results
+- Its own AI-generated digest
 
 ## Deployment Notes and Limits
 
@@ -270,8 +304,8 @@ docker-compose up -d
 
 The compose stack runs:
 
-- `secondbrain` for the Streamlit UI
-- `secondbrain-worker` for durable queued ingestion
+- `secondbrain` for the Streamlit UI (with health check)
+- `secondbrain-worker` for durable queued ingestion (with health check)
 
 Docker is the better choice when:
 
@@ -321,7 +355,7 @@ All product behavior is centralized in `config.yaml`.
 - `ui`: labels, headings, and help text
 - `theme`: colors and typography
 - `models`: LLM and embedding model options
-- `retrieval`: chunking and retrieval defaults
+- `retrieval`: chunking, retrieval defaults, and advanced mode toggles
 - `ingestion`: upload and chunk limits
 - `jobs`: worker mode, poll interval, and lease duration
 - `workspaces`: predefined workspaces
@@ -335,6 +369,10 @@ All product behavior is centralized in `config.yaml`.
 | `retrieval.chunk_overlap` | Overlap between adjacent chunks |
 | `retrieval.top_k` | Retrieval breadth before reranking |
 | `retrieval.final_k` | Final number of chunks sent to Claude |
+| `retrieval.default_hyde` | Enable HyDE retrieval by default |
+| `retrieval.default_decompose` | Enable query decomposition by default |
+| `retrieval.default_compress` | Enable contextual compression by default |
+| `retrieval.default_followups` | Enable follow-up suggestions by default |
 | `ingestion.max_upload_mb` | Streamlit file upload limit |
 | `ingestion.max_source_chunks` | Guardrail for oversized extracted sources |
 | `ingestion.embedding_batch_size` | Batch size used when writing embeddings |
@@ -371,6 +409,8 @@ Each job stores:
 
 In Docker, queued ingestion is intended to be handled by the dedicated `secondbrain-worker` service. In Streamlit-only deployments, the embedded worker remains available for convenience.
 
+The worker loop includes crash recovery: unexpected exceptions are logged and the worker continues after a brief cooldown instead of crashing the thread.
+
 ## API Reference
 
 ### `POST /ask`
@@ -385,6 +425,9 @@ Request:
   "tags": ["sre"],
   "hybrid": true,
   "use_rerank": false,
+  "use_hyde": false,
+  "use_decompose": false,
+  "use_compress": false,
   "model_id": "claude-sonnet-4-20250514",
   "min_similarity": 0.0,
   "workspace": "research"
@@ -431,6 +474,22 @@ Cancel a pending job immediately or request cancellation for a running job.
 
 Suggest tags for arbitrary text.
 
+### `POST /discover/digest`
+
+Generate an AI-powered digest of the workspace's themes and connections.
+
+### `GET /discover/related/{source_id}`
+
+Find sources semantically related to a given source.
+
+### `POST /discover/search`
+
+Search sources by semantic similarity to a query.
+
+### `POST /ask/followups`
+
+Suggest follow-up questions based on a Q&A exchange.
+
 ### `GET /workspaces`
 
 List persisted workspaces.
@@ -470,15 +529,15 @@ Use that surface to confirm:
 
 ## Project Structure
 
-- `app.py` — Streamlit application
-- `background_jobs.py` — persisted in-process ingestion worker
-- `api.py` — FastAPI wrapper
+- `app.py` — Streamlit application (8 tabs: Ingest, Ask, History, Sources, Discover, RSS Feeds, Analytics, Eval)
+- `background_jobs.py` — persisted in-process ingestion worker with crash recovery
+- `api.py` — FastAPI wrapper with 22 endpoints
 - `config.py` — config loader and helpers
 - `config.yaml` — product configuration
 - `db.py` — SQLite layer
 - `ingest.py` — extraction, chunking, embedding, storage, and maintenance operations
-- `query.py` — retrieval, reranking, generation, summaries, and tagging
-- `evaluate.py` — evaluation workflow
+- `query.py` — retrieval, reranking, generation, HyDE, decomposition, compression, follow-ups, digests, image analysis, and semantic source search
+- `evaluate.py` — evaluation workflow with per-pair error recovery
 - `worker.py` — standalone durable queue worker
 - `tests/` — unit tests
 - `packages.txt` — system packages for Streamlit Cloud OCR support
@@ -489,7 +548,7 @@ Source content, embeddings, and metadata remain local to the deployment environm
 
 The external calls made by the application are:
 
-- Anthropic API calls for generation, summarisation, tagging, and evaluation
+- Anthropic API calls for generation, summarisation, tagging, image analysis, evaluation, HyDE, decomposition, compression, follow-ups, and digests
 - Hugging Face model downloads on first use
 - URL and feed fetches when ingesting web content
 
@@ -505,5 +564,6 @@ That keeps setup simple, but it also means:
 - Chroma runs embedded in-process
 - queued ingestion is durable in Docker, but still lightweight compared with a full distributed job system
 - very heavy imports are still better suited to Docker or a dedicated service host
+- advanced retrieval modes (HyDE, decomposition, compression) add Claude API calls and latency in exchange for quality
 
 For personal libraries and small-team knowledge bases, that tradeoff is usually the right one. For heavier pipelines, the natural next steps are external workers, job queues, stricter end-to-end integration tests, and a richer API surface.

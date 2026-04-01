@@ -21,29 +21,39 @@ def run_evaluation(workspace: str | None = None, hybrid: bool = True,
 
     results = []
     for pair in pairs:
-        result = query.ask(
-            pair["question"],
-            tags=pair.get("tags") or None,
-            hybrid=hybrid,
-            use_rerank=use_rerank,
-            workspace=workspace,
-        )
+        try:
+            result = query.ask(
+                pair["question"],
+                tags=pair.get("tags") or None,
+                hybrid=hybrid,
+                use_rerank=use_rerank,
+                workspace=workspace,
+            )
 
-        # Score the answer
-        score_result = _score_answer(
-            pair["question"],
-            pair["expected_answer"],
-            result["answer"],
-            workspace=workspace or pair.get("workspace", "default"),
-        )
-        results.append({
-            "question": pair["question"],
-            "expected": pair["expected_answer"],
-            "actual": result["answer"],
-            "score": score_result["score"],
-            "reasoning": score_result["reasoning"],
-            "sources_used": len(result.get("sources", [])),
-        })
+            # Score the answer
+            score_result = _score_answer(
+                pair["question"],
+                pair["expected_answer"],
+                result["answer"],
+                workspace=workspace or pair.get("workspace", "default"),
+            )
+            results.append({
+                "question": pair["question"],
+                "expected": pair["expected_answer"],
+                "actual": result["answer"],
+                "score": score_result["score"],
+                "reasoning": score_result["reasoning"],
+                "sources_used": len(result.get("sources", [])),
+            })
+        except Exception as exc:
+            results.append({
+                "question": pair["question"],
+                "expected": pair["expected_answer"],
+                "actual": f"Error: {exc}",
+                "score": 1,
+                "reasoning": f"Evaluation failed: {exc}",
+                "sources_used": 0,
+            })
 
     return results
 

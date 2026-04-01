@@ -1676,6 +1676,24 @@ with tab_analytics:
         else:
             st.caption("No embeddings yet.")
 
+    # Ingestion timeline
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown("#### Ingestion Timeline")
+    timeline = db.get_ingestion_timeline(workspace=active_workspace, days=30)
+    if timeline:
+        import pandas as pd
+        tl_df = pd.DataFrame(timeline)
+        tl_df["day"] = pd.to_datetime(tl_df["day"])
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.markdown("**Sources added per day**")
+            st.area_chart(tl_df, x="day", y="sources")
+        with chart_col2:
+            st.markdown("**Chunks created per day**")
+            st.area_chart(tl_df, x="day", y="chunks")
+    else:
+        st.caption("No ingestion data in the last 30 days.")
+
     # Cost breakdown
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### API Cost Breakdown")

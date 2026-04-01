@@ -270,9 +270,13 @@ def run_worker_forever(worker_id: str | None = None) -> None:
     active_worker_id = worker_id or _build_worker_id("worker")
     logger.info("Worker %s polling every %.1fs", active_worker_id, _poll_interval_seconds())
     while True:
-        job = process_next_job(active_worker_id)
-        if job is None:
-            time.sleep(_poll_interval_seconds())
+        try:
+            job = process_next_job(active_worker_id)
+            if job is None:
+                time.sleep(_poll_interval_seconds())
+        except Exception:
+            logger.exception("Worker %s encountered an unexpected error; continuing after cooldown", active_worker_id)
+            time.sleep(_poll_interval_seconds() * 2)
 
 
 def _process_job(job: dict) -> dict:

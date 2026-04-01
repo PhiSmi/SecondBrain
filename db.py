@@ -569,6 +569,25 @@ def get_api_usage_stats(workspace: str | None = None) -> dict:
     }
 
 
+def get_ingestion_timeline(workspace: str | None = None, days: int = 30) -> list[dict]:
+    """Return daily ingestion counts for the last N days."""
+    conn = _get_conn()
+    ws_filter = " AND workspace = ?" if workspace else ""
+    params: tuple = ()
+    if workspace:
+        params = (workspace,)
+    rows = conn.execute(
+        f"""SELECT DATE(ingested_at) as day, COUNT(*) as sources, SUM(chunk_count) as chunks
+            FROM sources
+            WHERE ingested_at >= DATE('now', '-{days} days'){ws_filter}
+            GROUP BY DATE(ingested_at)
+            ORDER BY day""",
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Background ingest jobs
 # ---------------------------------------------------------------------------
