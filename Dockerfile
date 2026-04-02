@@ -18,13 +18,10 @@ COPY . .
 # Create data directory
 RUN mkdir -p data
 
-EXPOSE 8501
+ENV PORT=8000
+EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+    CMD curl -f http://localhost:${PORT}/health || exit 1
 
-ENTRYPOINT ["streamlit", "run", "app.py", \
-    "--server.port=8501", \
-    "--server.address=0.0.0.0", \
-    "--server.headless=true", \
-    "--browser.gatherUsageStats=false"]
+CMD uvicorn api:app --host 0.0.0.0 --port $PORT
