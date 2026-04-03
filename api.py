@@ -3,11 +3,24 @@
 Run with: uvicorn api:app --host 0.0.0.0 --port 8000
 """
 
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+import os
+import threading
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse, Response
 
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
@@ -17,11 +30,130 @@ import ingest  # noqa: E402
 import query  # noqa: E402
 import runtime_checks  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# API key authentication
+# ---------------------------------------------------------------------------
+
+_API_KEY = os.getenv("SECONDBRAIN_API_KEY", "").strip()
+
+
+def _check_api_key(request: Request) -> bool:
+    """Return True if the request carries a valid API key (or auth is disabled)."""
+    if not _API_KEY:
+        return True  # no key configured — open access (backwards-compatible)
+    candidate = (request.headers.get("x-api-key") or "").strip()
+    if not candidate:
+        return False
+    return hmac.compare_digest(candidate, _API_KEY)
+
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Reject requests without a valid X-API-Key header (when configured)."""
+
+    _OPEN_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+
+    async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
+        if request.url.path in self._OPEN_PATHS:
+            return await call_next(request)
+        if not _check_api_key(request):
+            return JSONResponse(
+                {"detail": "Missing or invalid API key. Set X-API-Key header."},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (per-IP, in-memory)
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT = int(os.getenv("SECONDBRAIN_RATE_LIMIT", "60"))  # requests per window
+_RATE_WINDOW = 3600  # 1 hour
+
+
+@dataclass
+class _ClientRecord:
+    timestamps: list[float] = field(default_factory=list)
+
+
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    """In-memory per-IP rate limiter."""
+
+    def __init__(self, app, *, requests_per_hour: int = _RATE_LIMIT) -> None:  # noqa: ANN001
+        super().__init__(app)
+        self.limit = requests_per_hour
+        self._records: dict[str, _ClientRecord] = defaultdict(_ClientRecord)
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _client_ip(request: Request) -> str:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+    async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
+        ip = self._client_ip(request)
+        now = time.time()
+        cutoff = now - _RATE_WINDOW
+
+        with self._lock:
+            record = self._records[ip]
+            record.timestamps = [t for t in record.timestamps if t > cutoff]
+            if len(record.timestamps) >= self.limit:
+                retry_after = int(record.timestamps[0] + _RATE_WINDOW - now) + 1
+                return JSONResponse(
+                    {"detail": "Rate limit exceeded. Try again later."},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+            record.timestamps.append(now)
+            remaining = max(self.limit - len(record.timestamps), 0)
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(self.limit)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Security headers
+# ---------------------------------------------------------------------------
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
 app = FastAPI(
     title="SecondBrain API",
     description="Programmatic access to your personal RAG knowledge base",
     version="2.0",
 )
+
+# CORS — restrict to known origins (falls back to localhost for dev)
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8501").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["X-API-Key", "Content-Type"],
+)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimiterMiddleware, requests_per_hour=_RATE_LIMIT)
+app.add_middleware(APIKeyMiddleware)
 
 
 # ---------------------------------------------------------------------------
