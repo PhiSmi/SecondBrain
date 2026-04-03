@@ -5,7 +5,6 @@ Run with: uvicorn api:app --host 0.0.0.0 --port 8000
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 import os
