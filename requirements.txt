@@ -18,7 +18,7 @@ torch==2.11.0 ; platform_system != "Linux"
 
 # Content ingestion
 beautifulsoup4==4.14.3
-requests==2.33.0
+requests==2.33.1
 pdfplumber==0.11.9
 pdf2image==1.17.0
 pytesseract==0.3.13
