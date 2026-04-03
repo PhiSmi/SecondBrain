@@ -3,7 +3,7 @@
 # App surface
 streamlit==1.55.0
 fastapi==0.128.8
-uvicorn==0.42.0
+uvicorn==0.43.0
 anthropic==0.86.0
 python-dotenv==1.2.2
 PyYAML==6.0.3
