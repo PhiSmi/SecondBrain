@@ -15,8 +15,12 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 
 COPY . .
 
-# Create data directory
-RUN mkdir -p data
+# Create data directory and non-root user
+RUN mkdir -p data \
+    && adduser --disabled-password --gecos '' appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 ENV PORT=8000
 EXPOSE 8000
