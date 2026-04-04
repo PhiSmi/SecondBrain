@@ -26,6 +26,9 @@ Pillow==12.1.1
 youtube-transcript-api==1.2.4
 feedparser==6.0.12
 
+# Event publishing
+httpx==0.28.1
+
 # Observability
 prometheus-client>=0.21,<1
 

@@ -443,6 +443,13 @@ def ingest_text(
         _ensure_chunk_limit(title, chunks)
         _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id, ingest_job_id)
         record_ingest(source_type, "success", len(chunks))
+        # Publish ingestion_complete event to event hub
+        from event_publisher import publish_event
+        publish_event(
+            event_type="ingestion_complete",
+            severity="info",
+            payload={"source_type": source_type, "chunks": len(chunks), "workspace": workspace or "default"},
+        )
         return len(chunks)
     except Exception:
         record_ingest(source_type, "error")
