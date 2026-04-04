@@ -433,12 +433,20 @@ def ingest_text(
     ingest_job_id: int | None = None,
 ) -> int:
     """Chunk, embed and store raw text. Returns chunk count."""
+    from metrics import record_ingest
+
     chunks = chunk_text(text)
     if not chunks:
+        record_ingest(source_type, "success", 0)
         return 0
-    _ensure_chunk_limit(title, chunks)
-    _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id, ingest_job_id)
-    return len(chunks)
+    try:
+        _ensure_chunk_limit(title, chunks)
+        _embed_and_store(chunks, title, source_type, url, tags, workspace, embed_model_id, ingest_job_id)
+        record_ingest(source_type, "success", len(chunks))
+        return len(chunks)
+    except Exception:
+        record_ingest(source_type, "error")
+        raise
 
 
 def ingest_url(

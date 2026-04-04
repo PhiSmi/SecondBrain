@@ -345,10 +345,14 @@ def ask(
     use_compress: bool = False,
 ) -> dict:
     """Full RAG pipeline. Returns {answer, sources, history}."""
+    import time as _time
+    from metrics import observe_chunks_retrieved, observe_query_stage, record_llm_usage
+
     ui_cfg = config.ui("ask")
     final_k = _retrieval_setting("final_k", 5)
 
     # Choose retrieval strategy
+    _t0 = _time.perf_counter()
     if use_decompose:
         chunks = multi_query_retrieve(
             question, tags=tags, hybrid=hybrid,
@@ -367,6 +371,8 @@ def ask(
             min_similarity=min_similarity, workspace=workspace,
             embed_model_id=embed_model_id,
         )
+    observe_query_stage("retrieval", _time.perf_counter() - _t0)
+    observe_chunks_retrieved(len(chunks))
 
     if not chunks:
         return {
@@ -376,10 +382,12 @@ def ask(
             "history": history or [],
         }
 
+    _t0 = _time.perf_counter()
     if use_rerank:
         chunks = rerank(question, chunks, top_n=final_k)
     else:
         chunks = chunks[:final_k]
+    observe_query_stage("rerank", _time.perf_counter() - _t0)
 
     # Contextual compression
     if use_compress:
@@ -395,14 +403,21 @@ def ask(
 
     client = _get_anthropic()
     used_model = model_id or "claude-sonnet-4-20250514"
+    _t0 = _time.perf_counter()
     response = client.messages.create(
         model=used_model,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=messages,
     )
+    observe_query_stage("llm_answer", _time.perf_counter() - _t0)
     answer = response.content[0].text
     _track_api_usage(response.usage, used_model, "query", workspace=workspace)
+    record_llm_usage(
+        used_model,
+        getattr(response.usage, "input_tokens", 0),
+        getattr(response.usage, "output_tokens", 0),
+    )
 
     updated_history = list(history or [])
     updated_history.append({"role": "user", "content": question})

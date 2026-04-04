@@ -51,7 +51,7 @@ def _check_api_key(request: Request) -> bool:
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Reject requests without a valid X-API-Key header (when configured)."""
 
-    _OPEN_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+    _OPEN_PATHS = {"/health", "/docs", "/redoc", "/openapi.json", "/metrics"}
 
     async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
         if request.url.path in self._OPEN_PATHS:
@@ -153,6 +153,9 @@ app.add_middleware(
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimiterMiddleware, requests_per_hour=_RATE_LIMIT)
 app.add_middleware(APIKeyMiddleware)
+
+from metrics import MetricsMiddleware, metrics_endpoint as _metrics_endpoint  # noqa: E402
+app.add_middleware(MetricsMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +435,11 @@ def api_semantic_source_search(q: str, workspace: str | None = None):
 def api_suggest_followups(question: str, answer: str, workspace: str = "default"):
     """Suggest follow-up questions based on a Q&A exchange."""
     return {"followups": query.suggest_followups(question, answer, workspace=workspace)}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(request: Request):
+    return _metrics_endpoint(request)
 
 
 @app.get("/health")
